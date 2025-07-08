@@ -214,19 +214,158 @@ async function run() {
         });
 
         // ================= Bookings =================
-        app.post("/bookings", async (req, res) => {
-            const booking = req.body;
+        // Get all bookings with user data (admin only)
+        app.get("/bookings", verifyJWT, verifyAdmin, async (req, res) => {
+            try {
+                const bookings = await bookingsCollection.aggregate([
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "email",
+                            foreignField: "email",
+                            as: "userDetails",
+                        },
+                    },
+                    { $unwind: "$userDetails" },
+                    {
+                        $project: {
+                            trainerId: 1,
+                            slotId: 1,
+                            slotName: 1,
+                            slotTime: 1,
+                            slotDay: 1,
+                            packageId: 1,
+                            packageName: 1,
+                            packagePrice: 1,
+                            sessionType: 1,
+                            price: 1,
+                            transactionId: 1,
+                            paymentStatus: 1,
+                            createdAt: 1,
+                            userName: "$userDetails.displayName",
+                            userEmail: "$userDetails.email",
+                            userPhotoURL: "$userDetails.photoURL",
+                            userRole: "$userDetails.role",
+                            userLastSignInTime: "$userDetails.lastSignInTime",
+                        },
+                    },
+                ]).toArray();
 
-            // Save booking
-            const result = await bookingsCollection.insertOne(booking);
+                res.send(bookings);
+            } catch (error) {
+                console.error("Failed to fetch bookings:", error);
+                res.status(500).send({ error: "Failed to fetch bookings" });
+            }
+        });
 
-            // Mark the slot as booked
-            await trainerCollection.updateOne(
-                { _id: new ObjectId(booking.trainerId), "slots.id": booking.slotId },
-                { $set: { "slots.$.isBooked": true } }
-            );
+        // Get bookings by user email (self or admin)
+        app.get("/bookings/user/:email", verifyJWT, async (req, res) => {
+            const email = req.params.email;
 
-            res.send(result);
+            if (req.decoded.role !== "admin" && req.decoded.email !== email) {
+                return res.status(403).send({ message: "Forbidden: Cannot access other user's bookings" });
+            }
+
+            try {
+                const bookings = await bookingsCollection.aggregate([
+                    { $match: { email } },
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "email",
+                            foreignField: "email",
+                            as: "userDetails",
+                        },
+                    },
+                    { $unwind: "$userDetails" },
+                    {
+                        $project: {
+                            trainerId: 1,
+                            slotId: 1,
+                            slotName: 1,
+                            slotTime: 1,
+                            slotDay: 1,
+                            packageId: 1,
+                            packageName: 1,
+                            packagePrice: 1,
+                            sessionType: 1,
+                            price: 1,
+                            transactionId: 1,
+                            paymentStatus: 1,
+                            createdAt: 1,
+                            userName: "$userDetails.displayName",
+                            userEmail: "$userDetails.email",
+                            userPhotoURL: "$userDetails.photoURL",
+                            userRole: "$userDetails.role",
+                            userLastSignInTime: "$userDetails.lastSignInTime",
+                        },
+                    },
+                ]).toArray();
+
+                res.send(bookings);
+            } catch (error) {
+                console.error("Failed to fetch user bookings:", error);
+                res.status(500).send({ error: "Failed to fetch user bookings" });
+            }
+        });
+
+        // Create a booking (authenticated user)
+        app.post("/bookings", verifyJWT, async (req, res) => {
+            try {
+                let booking = req.body;
+                booking.email = req.decoded.email;
+                booking.createdAt = new Date().toISOString();
+                booking.paymentStatus = booking.paymentStatus || "pending";
+
+                // Get user info
+                const user = await usersCollection.findOne({ email: booking.email });
+
+                // Get trainer info
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(booking.trainerId) });
+                if (!trainer) return res.status(400).send({ error: "Trainer not found" });
+
+                // Find slot info inside trainer
+                const slot = trainer.slots.find((s) => s.id === booking.slotId);
+                if (!slot) return res.status(400).send({ error: "Slot not found" });
+
+                // Package info (static)
+                const packages = [
+                    { id: "basic", name: "Basic Membership", price: 10, sessionType: "Group Training" },
+                    { id: "standard", name: "Standard Membership", price: 50, sessionType: "Group & Personal Training" },
+                    { id: "premium", name: "Premium Membership", price: 100, sessionType: "Personal Training" },
+                ];
+
+                const pkg = packages.find((p) => p.id === booking.packageId);
+                if (!pkg) return res.status(400).send({ error: "Package not found" });
+
+                // Enrich booking
+                booking = {
+                    ...booking,
+                    clientName: user?.displayName || "Unknown",
+                    clientInitial: user?.displayName ? user.displayName.charAt(0) : "U",
+                    clientPhotoURL: user?.photoURL || "",
+                    slotName: slot.name,
+                    slotTime: slot.time,
+                    slotDay: slot.day,
+                    packageName: pkg.name,
+                    packagePrice: pkg.price,
+                    sessionType: pkg.sessionType,
+                };
+
+                // Insert booking
+                const result = await bookingsCollection.insertOne(booking);
+
+                // Mark slot as booked
+                await trainerCollection.updateOne(
+                    { _id: new ObjectId(booking.trainerId), "slots.id": booking.slotId },
+                    { $set: { "slots.$.isBooked": true } }
+                );
+
+                res.status(201).send({ message: "Booking created", bookingId: result.insertedId });
+            } catch (error) {
+                console.error("Failed to create booking:", error);
+                res.status(500).send({ error: "Failed to create booking" });
+            }
         });
 
         // ================= Stripe Payment Intent =================
