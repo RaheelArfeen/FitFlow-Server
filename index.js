@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const dotenv = require("dotenv");
 dotenv.config();
+
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
 const app = express();
@@ -26,7 +27,11 @@ app.use(cors({
     origin: ["http://localhost:5173"], // adjust for your frontend URL
     credentials: true,
 }));
-app.use(express.json());
+
+// 🔧 Increased payload size limit to 10MB to prevent 413 error
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
 app.use(cookieParser());
 
 // ---------- Middleware Utilities ----------
@@ -77,6 +82,31 @@ async function run() {
         await client.connect();
         const db = client.db("fitflowDB");
         const usersCollection = db.collection("users");
+        const trainerCollection = db.collection("trainers");
+
+        // ===== Trainers =====
+
+        app.get("/trainers", async (req, res) => {
+            try {
+                const trainers = await trainerCollection.find({}).toArray();
+                res.send(trainers);
+            } catch (error) {
+                res.status(500).send({ message: "Failed to load trainers" });
+            }
+        });
+
+        // POST: Register a new trainer
+        app.post("/trainers", async (req, res) => {
+            const trainer = req.body;
+            trainer.status = "pending";
+            try {
+                const result = await trainerCollection.insertOne(trainer);
+                res.status(201).send(result);
+            } catch (error) {
+                console.error("Error creating trainer:", error);
+                res.status(500).send({ message: "Failed to register trainer" });
+            }
+        });
 
         // Make usersCollection accessible in req
         app.use((req, res, next) => {
@@ -169,21 +199,33 @@ async function run() {
             }
         });
 
-        // JWT Login route: creates JWT including role, sets cookie
-        app.post("/login", async (req, res) => {
-            const { email } = req.body;
-            if (!email) return res.status(400).send({ message: "Email required" });
+        // JWT Register route
+        app.post("/register", async (req, res) => {
+            const { email, displayName, photoURL, lastSignInTime } = req.body;
+            if (!email) return res.status(400).json({ error: "Email required" });
 
             try {
-                const user = await usersCollection.findOne({ email });
-                if (!user) return res.status(401).send({ message: "Invalid user" });
+                await req.usersCollection.updateOne(
+                    { email },
+                    {
+                        $set: {
+                            email,
+                            displayName,
+                            photoURL,
+                            lastSignInTime: lastSignInTime || new Date().toISOString(),
+                            role: "member",
+                        },
+                    },
+                    { upsert: true }
+                );
 
-                const payload = {
-                    email: user.email,
-                    id: user._id.toString(),
-                    role: user.role || "member",
-                };
-                const token = jwt.sign(payload, process.env.JWT_ACCESS_SECRET, { expiresIn: "1h" });
+                const user = await req.usersCollection.findOne({ email });
+
+                const token = jwt.sign(
+                    { email: user.email, role: user.role },
+                    process.env.JWT_ACCESS_SECRET,
+                    { expiresIn: "1h" }
+                );
 
                 res.cookie("token", token, {
                     httpOnly: true,
@@ -192,27 +234,55 @@ async function run() {
                     maxAge: 3600000,
                 });
 
-                res.send({ message: "Login successful", user: { email: user.email, role: user.role } });
-            } catch (error) {
-                console.error("Login error:", error);
-                res.status(500).send({ message: "Login failed" });
+                res.json({ message: "User registered and logged in", user: { email: user.email, role: user.role } });
+            } catch (err) {
+                console.error("Register error:", err);
+                res.status(500).json({ error: "Internal server error" });
             }
         });
 
-        // JWT Logout route: clears cookie
+        // JWT Login route
+        app.post("/login", async (req, res) => {
+            const { email } = req.body;
+            if (!email) return res.status(400).json({ error: "Email required" });
+
+            try {
+                const user = await req.usersCollection.findOne({ email });
+                if (!user) return res.status(401).json({ error: "User not found" });
+
+                const token = jwt.sign(
+                    { uid: user.uid, email: user.email, role: user.role },
+                    process.env.JWT_ACCESS_SECRET,
+                    { expiresIn: "1h" }
+                );
+
+                res.cookie("token", token, {
+                    httpOnly: true,
+                    secure: process.env.NODE_ENV === "production",
+                    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+                    maxAge: 3600000,
+                });
+
+                res.json({ message: "Login successful", user: { email: user.email, role: user.role } });
+            } catch (err) {
+                console.error("Login error:", err);
+                res.status(500).json({ error: "Internal server error" });
+            }
+        });
+
+        // Logout route
         app.post("/logout", (req, res) => {
             res.clearCookie("token", {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === "production",
                 sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
             });
-            res.send({ message: "Logged out successfully" });
+            res.json({ message: "Logged out" });
         });
 
-        // Ping MongoDB
+        // Confirm MongoDB connection
         await db.command({ ping: 1 });
-        console.log("Connected to MongoDB and server running");
-
+        console.log("Connected to MongoDB and server running.");
     } catch (error) {
         console.error("MongoDB connection failed:", error);
     }
