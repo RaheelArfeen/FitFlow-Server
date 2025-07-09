@@ -227,7 +227,6 @@ async function run() {
                     createdAt,
                     likes: 0,
                     dislikes: 0,
-                    views: 0,
                     comments: [], // initialize empty
                 };
 
@@ -236,6 +235,43 @@ async function run() {
             } catch (error) {
                 console.error("Error adding post:", error);
                 res.status(500).send({ message: "Failed to add post." });
+            }
+        });
+
+        app.post("/community/:postId/comments", verifyJWT, async (req, res) => {
+            try {
+                const { postId } = req.params;
+                const { commentText } = req.body;
+                const userEmail = req.decoded.email;
+
+                // Get user info from DB to attach with comment
+                const user = await req.usersCollection.findOne({ email: userEmail });
+
+                if (!user) return res.status(404).send({ message: "User not found" });
+
+                const newComment = {
+                    _id: new ObjectId(), // unique id for comment
+                    text: commentText,
+                    author: user.displayName || "Anonymous",
+                    authorPhoto: user.photoURL || "",
+                    authorRole: user.role || "member",
+                    email: user.email,
+                    createdAt: new Date().toISOString(),
+                };
+
+                const result = await communityCollection.updateOne(
+                    { _id: new ObjectId(postId) },
+                    { $push: { comments: newComment } }
+                );
+
+                if (result.modifiedCount === 0) {
+                    return res.status(404).send({ message: "Post not found or comment not added" });
+                }
+
+                res.status(201).send({ message: "Comment added", comment: newComment });
+            } catch (error) {
+                console.error("Error adding comment:", error);
+                res.status(500).send({ message: "Failed to add comment" });
             }
         });
 
