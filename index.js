@@ -275,6 +275,65 @@ async function run() {
             }
         });
 
+        // ✅ Like/Dislike a post
+        app.post("/community/vote", verifyJWT, async (req, res) => {
+            try {
+                const { postId, voteType } = req.body;
+                const userEmail = req.decoded.email;
+
+                if (!postId || (voteType !== "like" && voteType !== "dislike" && voteType !== null)) {
+                    return res.status(400).json({ message: "Invalid vote type or missing postId" });
+                }
+
+                const post = await communityCollection.findOne({ _id: new ObjectId(postId) });
+                if (!post) return res.status(404).json({ message: "Post not found" });
+
+                const existingVote = post.votes?.find((v) => v.email === userEmail);
+
+                let updateQuery = {};
+                let options = {};
+
+                if (existingVote) {
+                    if (voteType === null || existingVote.type === voteType) {
+                        // Toggle OFF or remove same vote
+                        updateQuery = {
+                            $inc: { [existingVote.type === "like" ? "likes" : "dislikes"]: -1 },
+                            $pull: { votes: { email: userEmail } },
+                        };
+                    } else {
+                        // Switch vote type
+                        updateQuery = {
+                            $inc: {
+                                [voteType === "like" ? "likes" : "dislikes"]: 1,
+                                [voteType === "like" ? "dislikes" : "likes"]: -1,
+                            },
+                            $set: { "votes.$[elem].type": voteType },
+                        };
+                        options = { arrayFilters: [{ "elem.email": userEmail }] };
+                    }
+                } else if (voteType !== null) {
+                    // New vote
+                    updateQuery = {
+                        $inc: { [voteType === "like" ? "likes" : "dislikes"]: 1 },
+                        $push: { votes: { email: userEmail, type: voteType } },
+                    };
+                } else {
+                    return res.status(400).json({ message: "Nothing to toggle off" });
+                }
+
+                const result = await communityCollection.updateOne(
+                    { _id: new ObjectId(postId) },
+                    updateQuery,
+                    options
+                );
+
+                res.send({ message: "Vote processed", result });
+            } catch (err) {
+                console.error("Vote error:", err);
+                res.status(500).send({ message: "Vote failed" });
+            }
+        });
+
         // ================= Users routes =================
         app.get("/users", async (req, res) => {
             const users = await usersCollection.find().toArray();
