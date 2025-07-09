@@ -105,6 +105,84 @@ async function run() {
             res.send(trainer);
         });
 
+        // ========== Trainer Ratings ==========
+        app.get("/trainers/rating/:id", verifyJWT, async (req, res) => {
+            const trainerId = req.params.id;
+            const userEmail = req.decoded.email;
+
+            try {
+                const trainer = await trainerCollection.findOne(
+                    { _id: new ObjectId(trainerId) },
+                    { projection: { ratings: 1, rating: 1 } }
+                );
+
+                if (!trainer) {
+                    return res.status(404).send({ message: "Trainer not found" });
+                }
+
+                // Find logged-in user's rating if exists
+                const userRatingObj = trainer.ratings?.find(r => r.email === userEmail);
+                const userRating = userRatingObj ? userRatingObj.rating : 0;
+
+                res.send({
+                    averageRating: trainer.rating || 0,
+                    totalRatings: trainer.ratings?.length || 0,
+                    ratings: trainer.ratings || [],
+                    userRating,
+                });
+            } catch (error) {
+                console.error("Failed to fetch trainer ratings:", error);
+                res.status(500).send({ message: "Internal server error" });
+            }
+        });
+
+        app.post("/trainers/rating/:id", verifyJWT, async (req, res) => {
+            const trainerId = req.params.id;
+            const { rating } = req.body;
+            const userEmail = req.decoded.email;
+
+            try {
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+
+                if (!trainer) {
+                    return res.status(404).send({ success: false, message: "Trainer not found" });
+                }
+
+                // Check if user already rated
+                const alreadyRated = trainer.ratings?.find((r) => r.email === userEmail);
+                if (alreadyRated) {
+                    return res.send({ success: false, message: "You already rated this trainer." });
+                }
+
+                // Add new rating
+                const newRating = {
+                    email: userEmail,
+                    name: req.decoded.name || "Anonymous",
+                    rating,
+                    date: new Date(),
+                };
+
+                const updatedRatings = [...(trainer.ratings || []), newRating];
+                const avgRating =
+                    updatedRatings.reduce((sum, r) => sum + r.rating, 0) / updatedRatings.length;
+
+                const result = await trainerCollection.updateOne(
+                    { _id: new ObjectId(trainerId) },
+                    {
+                        $set: {
+                            ratings: updatedRatings,
+                            rating: avgRating,
+                        },
+                    }
+                );
+
+                res.send({ success: true, message: "Rating submitted", result });
+            } catch (error) {
+                console.error("Error submitting rating:", error);
+                res.status(500).send({ success: false, message: "Failed to submit rating" });
+            }
+        });
+
         // ================= Users routes =================
         app.get("/users", async (req, res) => {
             const users = await usersCollection.find().toArray();
