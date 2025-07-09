@@ -80,6 +80,7 @@ async function run() {
         const trainerCollection = db.collection("trainers");
         const bookingsCollection = db.collection("bookings");
         const paymentsCollection = db.collection("payments");
+        const communityCollection = db.collection("community")
 
         // Attach to req for middleware
         app.use((req, res, next) => {
@@ -180,6 +181,61 @@ async function run() {
             } catch (error) {
                 console.error("Error submitting rating:", error);
                 res.status(500).send({ success: false, message: "Failed to submit rating" });
+            }
+        });
+
+        // ================= Community routes ====================
+        app.get('/community', async (req, res) => {
+            try {
+                const posts = await communityCollection.find().sort({ createdAt: -1 }).toArray();
+                res.send(posts);
+            } catch (error) {
+                console.error('Error fetching community posts:', error);
+                res.status(500).send({ message: 'Failed to fetch posts.' });
+            }
+        });
+
+        app.get('/community/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+                const post = await communityCollection.findOne({ _id: new ObjectId(id) });
+
+                if (!post) {
+                    return res.status(404).send({ message: 'Post not found.' });
+                }
+
+                res.send(post);
+            } catch (error) {
+                console.error('Error fetching post by ID:', error);
+                res.status(500).send({ message: 'Failed to fetch post.' });
+            }
+        });
+
+        app.post("/community", verifyJWT, async (req, res) => {
+            try {
+                const { title, content, category, tags, author, authorPhoto, authorRole, email, createdAt } = req.body;
+
+                const post = {
+                    title,
+                    content,
+                    category,
+                    tags, // should be an array of strings
+                    author,
+                    authorPhoto,
+                    authorRole,
+                    email,
+                    createdAt,
+                    likes: 0,
+                    dislikes: 0,
+                    views: 0,
+                    comments: [], // initialize empty
+                };
+
+                const result = await communityCollection.insertOne(post);
+                res.send({ insertedId: result.insertedId });
+            } catch (error) {
+                console.error("Error adding post:", error);
+                res.status(500).send({ message: "Failed to add post." });
             }
         });
 
