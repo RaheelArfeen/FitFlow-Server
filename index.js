@@ -1,4 +1,4 @@
-// ✅ imports
+// imports
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
@@ -13,19 +13,19 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ✅ Firebase Admin Init
+// Firebase Admin Init
 const serviceAccount = require("./firebase-service-account.json");
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
 });
 
-// ✅ Mongo URI
+// Mongo URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.hqacvhm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 const client = new MongoClient(uri, {
     serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
 });
 
-// ✅ Middleware
+// Middleware
 app.use(
     cors({
         origin: ["http://localhost:5173"],
@@ -446,7 +446,7 @@ async function run() {
                 }
             );
 
-            // ✅ Set cookie
+            // Set cookie
             res.cookie("token", token, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === "production",
@@ -454,7 +454,7 @@ async function run() {
                 maxAge: 3600000,
             });
 
-            // ✅ Return response
+            // Return response
             res.json({
                 message: "Login successful",
                 user: {
@@ -759,20 +759,20 @@ async function run() {
 
         // Confirm DB connection
         await db.command({ ping: 1 });
-        console.log("✅ Connected to MongoDB and server running.");
+        console.log("Connected to MongoDB and server running.");
     } catch (error) {
-        console.error("❌ MongoDB connection failed:", error);
+        console.error("MongoDB connection failed:", error);
     }
 }
 
 run().catch(console.dir);
 
-// ✅ Root route
+// Root route
 app.get("/", (req, res) => {
     res.send("FitFlow server is up and running.");
 });
 
-// ✅ Start server
+// Start server
 app.listen(port, () => {
     console.log(`Server listening at http://localhost:${port}`);
 });
