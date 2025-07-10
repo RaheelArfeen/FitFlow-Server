@@ -398,9 +398,18 @@ async function run() {
 
             const user = await usersCollection.findOne({ email });
 
-            const token = jwt.sign({ email: user.email, role: user.role }, process.env.JWT_ACCESS_SECRET, {
-                expiresIn: "1h",
-            });
+            const token = jwt.sign(
+                {
+                    email: user.email,
+                    role: user.role,
+                    name: user.displayName,
+                },
+                process.env.JWT_ACCESS_SECRET,
+                {
+                    expiresIn: "1h",
+                }
+            );
+
 
             res.cookie("token", token, {
                 httpOnly: true,
@@ -414,15 +423,30 @@ async function run() {
 
         app.post("/login", async (req, res) => {
             const { email } = req.body;
-            if (!email) return res.status(400).json({ error: "Email required" });
+            if (!email) {
+                return res.status(400).json({ error: "Email required" });
+            }
 
             const user = await usersCollection.findOne({ email });
-            if (!user) return res.status(401).json({ error: "User not found" });
 
-            const token = jwt.sign({ email: user.email, role: user.role }, process.env.JWT_ACCESS_SECRET, {
-                expiresIn: "1h",
-            });
+            if (!user) {
+                return res.status(401).json({ error: "User not found" });
+            }
 
+            // ✅ Include name in the JWT payload
+            const token = jwt.sign(
+                {
+                    email: user.email,
+                    role: user.role,
+                    name: user.displayName || "Anonymous", // Include the name
+                },
+                process.env.JWT_ACCESS_SECRET,
+                {
+                    expiresIn: "1h",
+                }
+            );
+
+            // ✅ Set cookie
             res.cookie("token", token, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === "production",
@@ -430,7 +454,15 @@ async function run() {
                 maxAge: 3600000,
             });
 
-            res.json({ message: "Login successful", user: { email: user.email, role: user.role } });
+            // ✅ Return response
+            res.json({
+                message: "Login successful",
+                user: {
+                    email: user.email,
+                    role: user.role,
+                    displayName: user.displayName,
+                },
+            });
         });
 
         app.post("/logout", (req, res) => {
