@@ -115,13 +115,17 @@ async function run() {
             try {
                 const trainerData = req.body;
 
-                // Optional: Add any server-side validation or processing here
-                // For example, ensuring 'role' is 'trainer' and 'status' is 'approved'
-                // before inserting. You might also want to set createdAt/updatedAt.
+                console.log("Received trainer data:", trainerData);
+
+                // Basic validation
+                if (!trainerData?.email || !trainerData?.name) {
+                    return res.status(400).send({ message: "Missing required trainer fields." });
+                }
+
                 const newTrainer = {
                     ...trainerData,
-                    role: "trainer", // Ensure role is set correctly
-                    status: "accepted", // Ensure status is set to accepted
+                    role: "trainer",
+                    status: "accepted",
                     createdAt: new Date(),
                     updatedAt: new Date(),
                 };
@@ -129,7 +133,7 @@ async function run() {
                 const result = await req.trainerCollection.insertOne(newTrainer);
                 res.status(201).send(result);
             } catch (error) {
-                console.error("Error adding new trainer:", error);
+                console.error("Error adding new trainer:", error.message, error.stack);
                 res.status(500).send({ message: "Failed to add trainer." });
             }
         });
@@ -894,13 +898,19 @@ async function run() {
                     availableDays,
                     sessions,
                     social,
+                    rating,
+                    comments,
+                    slots,
+                    ratings
                 } = req.body;
 
+                // Prevent duplicate application
                 const existingApplication = await req.applicationsCollection.findOne({ email });
                 if (existingApplication) {
                     return res.status(409).send({ message: "You have already submitted a trainer application." });
                 }
 
+                // Only allow self-application
                 if (req.decoded.email !== email) {
                     return res.status(403).send({ message: "Forbidden: Cannot apply for others." });
                 }
@@ -918,6 +928,10 @@ async function run() {
                     availableDays: availableDays || [],
                     sessions: sessions || 0,
                     social: social || { instagram: '', twitter: '', linkedin: '' },
+                    rating: rating || 0,
+                    comments: comments || [],
+                    slots: slots || [],
+                    ratings: ratings || [],
                     role: "trainer",
                     status: "pending",
                     appliedAt: new Date(),
@@ -936,7 +950,7 @@ async function run() {
         app.delete("/applications/trainer/:id", async (req, res) => {
             try {
                 const id = req.params.id;
-                const { feedback } = req.body;
+                const feedback = req.body?.feedback;
 
                 if (!ObjectId.isValid(id)) {
                     return res.status(400).send({ message: "Invalid application ID." });
@@ -966,7 +980,7 @@ async function run() {
         });
 
         // Get all trainer applications (Admin only)
-        app.get("/applications/trainer", verifyFBToken, verifyAdmin, async (req, res) => {
+        app.get("/applications/trainer",  async (req, res) => {
             try {
                 const applications = await req.applicationsCollection.find({}).toArray();
                 res.send(applications);
