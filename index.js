@@ -2,11 +2,10 @@
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
-const cookieParser = require("cookie-parser");
 const dotenv = require("dotenv");
 dotenv.config();
 
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb"); // Keep ObjectId from mongodb
 const admin = require("firebase-admin");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
@@ -14,6 +13,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Firebase Admin Init
+// Make sure firebase-service-account.json is in the same directory as index.js
 const serviceAccount = require("./firebase-service-account.json");
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -21,20 +21,25 @@ admin.initializeApp({
 
 // Mongo URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.hqacvhm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+
+// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
-    serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
+    serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+    }
 });
 
 // Middleware
 app.use(
     cors({
-        origin: ["http://localhost:5173"],
+        origin: ["http://localhost:5173", "https://your-frontend-domain.com"], // Add your production frontend URL here
         credentials: true,
     })
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
 
 // ================= Middleware Utils =================
 const verifyFBToken = async (req, res, next) => {
@@ -48,71 +53,105 @@ const verifyFBToken = async (req, res, next) => {
         req.decoded = decoded;
         next();
     } catch (error) {
+        console.error("Firebase token verification error:", error); // Log error for debugging
         res.status(403).send({ message: "Forbidden: Invalid Firebase token" });
     }
 };
 
-const verifyJWT = (req, res, next) => {
-    const token = req.cookies?.token;
-    if (!token) return res.status(401).send({ message: "Unauthorized: No JWT token" });
-    jwt.verify(token, process.env.JWT_ACCESS_SECRET, (err, decoded) => {
-        if (err) return res.status(403).send({ message: "Forbidden: Invalid JWT token" });
-        req.decoded = decoded;
-        next();
-    });
-};
 
 const verifyAdmin = async (req, res, next) => {
     const email = req.decoded?.email;
+
     const user = await req.usersCollection.findOne({ email });
+
     if (!user || user.role !== "admin") {
         return res.status(403).send({ message: "Forbidden: Not an admin" });
     }
+
     next();
 };
+
 
 // ================= MongoDB connection and routes =================
 async function run() {
     try {
+        // Connect the client to the server (optional starting in v4.7)
         await client.connect();
+        // Send a ping to confirm a successful connection
+        await client.db("admin").command({ ping: 1 });
+
         const db = client.db("fitflowDB");
         const usersCollection = db.collection("users");
         const trainerCollection = db.collection("trainers");
         const bookingsCollection = db.collection("bookings");
         const paymentsCollection = db.collection("payments");
-        const communityCollection = db.collection("community")
+        const communityCollection = db.collection("community");
+        const applicationsCollection = db.collection("applications"); // For trainer applications
 
-        // Attach to req for middleware
+        // Global middleware to attach collections to request object
         app.use((req, res, next) => {
             req.usersCollection = usersCollection;
+            req.trainerCollection = trainerCollection;
+            req.bookingsCollection = bookingsCollection;
+            req.paymentsCollection = paymentsCollection;
+            req.communityCollection = communityCollection;
+            req.applicationsCollection = applicationsCollection;
             next();
         });
 
         // ================= Trainers routes =================
         app.get("/trainers", async (req, res) => {
-            const trainers = await trainerCollection.find({}).toArray();
-            res.send(trainers);
+            try {
+                const trainers = await req.trainerCollection.find({}).toArray();
+                res.send(trainers);
+            } catch (error) {
+                console.error("Failed to fetch trainers:", error);
+                res.status(500).send({ message: "Failed to fetch trainers" });
+            }
         });
 
+        // Add a new trainer (from approved application)
         app.post("/trainers", async (req, res) => {
-            const trainer = { ...req.body, status: "pending" };
-            const result = await trainerCollection.insertOne(trainer);
-            res.status(201).send(result);
+            try {
+                const trainerData = req.body;
+
+                // Optional: Add any server-side validation or processing here
+                // For example, ensuring 'role' is 'trainer' and 'status' is 'approved'
+                // before inserting. You might also want to set createdAt/updatedAt.
+                const newTrainer = {
+                    ...trainerData,
+                    role: "trainer", // Ensure role is set correctly
+                    status: "accepted", // Ensure status is set to accepted
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                const result = await req.trainerCollection.insertOne(newTrainer);
+                res.status(201).send(result);
+            } catch (error) {
+                console.error("Error adding new trainer:", error);
+                res.status(500).send({ message: "Failed to add trainer." });
+            }
         });
 
         app.get("/trainers/:id", async (req, res) => {
-            const trainer = await trainerCollection.findOne({ _id: new ObjectId(req.params.id) });
-            if (!trainer) return res.status(404).send({ message: "Trainer not found" });
-            res.send(trainer);
+            try {
+                const trainer = await req.trainerCollection.findOne({ _id: new ObjectId(req.params.id) });
+                if (!trainer) return res.status(404).send({ message: "Trainer not found" });
+                res.send(trainer);
+            } catch (error) {
+                console.error("Failed to fetch trainer by ID:", error);
+                res.status(500).send({ message: "Failed to fetch trainer" });
+            }
         });
 
         // ========== Trainer Ratings ==========
-        app.get("/trainers/rating/:id", verifyJWT, async (req, res) => {
+        app.get("/trainers/rating/:id", verifyFBToken, async (req, res) => {
             const trainerId = req.params.id;
             const userEmail = req.decoded.email;
 
             try {
-                const trainer = await trainerCollection.findOne(
+                const trainer = await req.trainerCollection.findOne(
                     { _id: new ObjectId(trainerId) },
                     { projection: { ratings: 1, rating: 1 } }
                 );
@@ -121,7 +160,6 @@ async function run() {
                     return res.status(404).send({ message: "Trainer not found" });
                 }
 
-                // Find logged-in user's rating if exists
                 const userRatingObj = trainer.ratings?.find(r => r.email === userEmail);
                 const userRating = userRatingObj ? userRatingObj.rating : 0;
 
@@ -137,25 +175,23 @@ async function run() {
             }
         });
 
-        app.post("/trainers/rating/:id", verifyJWT, async (req, res) => {
+        app.post("/trainers/rating/:id", verifyFBToken, async (req, res) => {
             const trainerId = req.params.id;
             const { rating } = req.body;
             const userEmail = req.decoded.email;
 
             try {
-                const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+                const trainer = await req.trainerCollection.findOne({ _id: new ObjectId(trainerId) });
 
                 if (!trainer) {
                     return res.status(404).send({ success: false, message: "Trainer not found" });
                 }
 
-                // Check if user already rated
                 const alreadyRated = trainer.ratings?.find((r) => r.email === userEmail);
                 if (alreadyRated) {
                     return res.send({ success: false, message: "You already rated this trainer." });
                 }
 
-                // Add new rating
                 const newRating = {
                     email: userEmail,
                     name: req.decoded.name || "Anonymous",
@@ -167,12 +203,13 @@ async function run() {
                 const avgRating =
                     updatedRatings.reduce((sum, r) => sum + r.rating, 0) / updatedRatings.length;
 
-                const result = await trainerCollection.updateOne(
+                const result = await req.trainerCollection.updateOne(
                     { _id: new ObjectId(trainerId) },
                     {
                         $set: {
                             ratings: updatedRatings,
                             rating: avgRating,
+                            updatedAt: new Date(), // Update timestamp
                         },
                     }
                 );
@@ -187,7 +224,7 @@ async function run() {
         // ================= Community routes ====================
         app.get('/community', async (req, res) => {
             try {
-                const posts = await communityCollection.find().sort({ createdAt: -1 }).toArray();
+                const posts = await req.communityCollection.find().sort({ createdAt: -1 }).toArray();
                 res.send(posts);
             } catch (error) {
                 console.error('Error fetching community posts:', error);
@@ -198,7 +235,7 @@ async function run() {
         app.get('/community/:id', async (req, res) => {
             try {
                 const id = req.params.id;
-                const post = await communityCollection.findOne({ _id: new ObjectId(id) });
+                const post = await req.communityCollection.findOne({ _id: new ObjectId(id) });
 
                 if (!post) {
                     return res.status(404).send({ message: 'Post not found.' });
@@ -211,274 +248,362 @@ async function run() {
             }
         });
 
-        app.post("/community", verifyJWT, async (req, res) => {
+        app.post("/community", verifyFBToken, async (req, res) => {
             try {
-                const { title, content, category, tags, author, authorPhoto, authorRole, email, createdAt } = req.body;
+                const { title, content, category, tags, author, authorPhoto, authorRole, email } = req.body;
 
                 const post = {
                     title,
                     content,
                     category,
-                    tags, // should be an array of strings
+                    tags: tags || [], // Ensure tags is an array
                     author,
                     authorPhoto,
                     authorRole,
                     email,
-                    createdAt,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
                     likes: 0,
                     dislikes: 0,
-                    comments: [], // initialize empty
+                    comments: [],
+                    votes: [], // Initialize votes array
                 };
 
-                const result = await communityCollection.insertOne(post);
-                res.send({ insertedId: result.insertedId });
+                const result = await req.communityCollection.insertOne(post);
+                res.status(201).send({ insertedId: result.insertedId, message: "Post added successfully" });
             } catch (error) {
                 console.error("Error adding post:", error);
                 res.status(500).send({ message: "Failed to add post." });
             }
         });
 
-        app.post("/community/:postId/comments", verifyJWT, async (req, res) => {
+        app.post("/community/:postId/comments", verifyFBToken, async (req, res) => {
             try {
                 const { postId } = req.params;
                 const { commentText } = req.body;
                 const userEmail = req.decoded.email;
 
-                // Get user info from DB to attach with comment
-                const user = await req.usersCollection.findOne({ email: userEmail });
+                if (!commentText || commentText.trim() === "") {
+                    return res.status(400).send({ message: "Comment text is required" });
+                }
 
+                const user = await req.usersCollection.findOne({ email: userEmail });
                 if (!user) return res.status(404).send({ message: "User not found" });
 
                 const newComment = {
-                    _id: new ObjectId(), // unique id for comment
+                    _id: new ObjectId(), // Unique ID for comment
                     text: commentText,
                     author: user.displayName || "Anonymous",
                     authorPhoto: user.photoURL || "",
                     authorRole: user.role || "member",
                     email: user.email,
-                    createdAt: new Date().toISOString(),
+                    createdAt: new Date(),
                 };
 
-                const result = await communityCollection.updateOne(
+                // Add comment and update updatedAt
+                const result = await req.communityCollection.updateOne(
                     { _id: new ObjectId(postId) },
-                    { $push: { comments: newComment } }
+                    {
+                        $push: { comments: newComment },
+                        $set: { updatedAt: new Date() } // update post timestamp
+                    }
                 );
 
                 if (result.modifiedCount === 0) {
                     return res.status(404).send({ message: "Post not found or comment not added" });
                 }
 
-                res.status(201).send({ message: "Comment added", comment: newComment });
+                // Return updated post with sorted comments (newest first)
+                const updatedPost = await req.communityCollection.findOne({ _id: new ObjectId(postId) });
+
+                if (updatedPost?.comments?.length) {
+                    updatedPost.comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                }
+
+                res.status(201).send({
+                    message: "Comment added",
+                    comment: newComment,
+                    post: updatedPost
+                });
             } catch (error) {
                 console.error("Error adding comment:", error);
                 res.status(500).send({ message: "Failed to add comment" });
             }
         });
 
-        // ✅ Like/Dislike a post
-        app.post("/community/vote", verifyJWT, async (req, res) => {
+        app.delete("/community/:postId/comments/:commentId", verifyFBToken, async (req, res) => {
+            try {
+                const { postId, commentId } = req.params;
+                const userEmail = req.decoded.email; // Email of the currently authenticated user
+
+                // 1. Find the post
+                const post = await req.communityCollection.findOne({ _id: new ObjectId(postId) });
+
+                if (!post) {
+                    return res.status(404).send({ message: "Post not found." });
+                }
+
+                // 2. Find the comment within the post's comments array
+                const commentIndex = post.comments.findIndex(
+                    (comment) => comment._id.toString() === commentId // Convert ObjectId to string for comparison
+                );
+
+                if (commentIndex === -1) {
+                    return res.status(404).send({ message: "Comment not found on this post." });
+                }
+
+                // 3. Authorization check: Ensure the user trying to delete is the comment author
+                if (post.comments[commentIndex].email !== userEmail) {
+                    return res.status(403).send({ message: "Forbidden: You are not the author of this comment." });
+                }
+
+                // 4. Remove the comment from the array
+                post.comments.splice(commentIndex, 1);
+
+                // 5. Update the post in the database
+                const result = await req.communityCollection.updateOne(
+                    { _id: new ObjectId(postId) },
+                    {
+                        $set: {
+                            comments: post.comments,
+                            updatedAt: new Date(), // Update the post's last modified timestamp
+                        },
+                    }
+                );
+
+                if (result.modifiedCount === 0) {
+                    // This might happen if the post was found but not updated for some reason (e.g., no actual change)
+                    return res.status(500).send({ message: "Failed to delete comment: No changes made." });
+                }
+
+                res.status(200).send({ message: "Comment deleted successfully." });
+            } catch (error) {
+                console.error("Error deleting comment:", error);
+                res.status(500).send({ message: "Failed to delete comment. Please try again." });
+            }
+        });
+
+        app.post("/community/vote", verifyFBToken, async (req, res) => {
             try {
                 const { postId, voteType } = req.body;
-                const userEmail = req.decoded.email;
+                const email = req.decoded.email;
 
-                if (!postId || (voteType !== "like" && voteType !== "dislike" && voteType !== null)) {
-                    return res.status(400).json({ message: "Invalid vote type or missing postId" });
+                if (!postId || !["like", "dislike", null].includes(voteType)) {
+                    return res.status(400).json({ message: "Invalid vote type or postId" });
                 }
 
                 const post = await communityCollection.findOne({ _id: new ObjectId(postId) });
                 if (!post) return res.status(404).json({ message: "Post not found" });
 
-                const existingVote = post.votes?.find((v) => v.email === userEmail);
-
-                let updateQuery = {};
-                let options = {};
+                let votes = post.votes || [];
+                const existingVote = votes.find((v) => v.email === email);
+                let updatedVotes;
 
                 if (existingVote) {
-                    if (voteType === null || existingVote.type === voteType) {
-                        // Toggle OFF or remove same vote
-                        updateQuery = {
-                            $inc: { [existingVote.type === "like" ? "likes" : "dislikes"]: -1 },
-                            $pull: { votes: { email: userEmail } },
-                        };
-                    } else {
-                        // Switch vote type
-                        updateQuery = {
-                            $inc: {
-                                [voteType === "like" ? "likes" : "dislikes"]: 1,
-                                [voteType === "like" ? "dislikes" : "likes"]: -1,
-                            },
-                            $set: { "votes.$[elem].type": voteType },
-                        };
-                        options = { arrayFilters: [{ "elem.email": userEmail }] };
-                    }
-                } else if (voteType !== null) {
-                    // New vote
-                    updateQuery = {
-                        $inc: { [voteType === "like" ? "likes" : "dislikes"]: 1 },
-                        $push: { votes: { email: userEmail, type: voteType } },
-                    };
-                } else {
-                    return res.status(400).json({ message: "Nothing to toggle off" });
+                    // Remove current vote
+                    votes = votes.filter((v) => v.email !== email);
                 }
 
-                const result = await communityCollection.updateOne(
+                // Add new vote if not null
+                if (voteType) {
+                    votes.push({ email, type: voteType });
+                }
+
+                // Recalculate counts
+                const likes = votes.filter((v) => v.type === "like").length;
+                const dislikes = votes.filter((v) => v.type === "dislike").length;
+
+                // Save to DB
+                await communityCollection.updateOne(
                     { _id: new ObjectId(postId) },
-                    updateQuery,
-                    options
+                    {
+                        $set: {
+                            votes,
+                            likes,
+                            dislikes,
+                        },
+                    }
                 );
 
-                res.send({ message: "Vote processed", result });
+                res.json({ message: "Vote updated" });
             } catch (err) {
                 console.error("Vote error:", err);
-                res.status(500).send({ message: "Vote failed" });
+                res.status(500).json({ message: "Internal server error" });
             }
         });
 
         // ================= Users routes =================
         app.get("/users", async (req, res) => {
-            const users = await usersCollection.find().toArray();
-            res.send(users);
+            try {
+                const users = await req.usersCollection.find().toArray();
+                res.send(users);
+            } catch (error) {
+                console.error("Failed to fetch users:", error);
+                res.status(500).send({ message: "Failed to fetch users" });
+            }
         });
 
         app.get("/users/:email", async (req, res) => {
-            const user = await usersCollection.findOne({ email: req.params.email });
-            if (!user) return res.status(404).send({ message: "User not found" });
-            res.send(user);
+            try {
+                const user = await req.usersCollection.findOne({ email: req.params.email });
+                if (!user) return res.status(404).send({ message: "User not found" });
+                res.send(user);
+            } catch (error) {
+                console.error("Failed to fetch user by email:", error);
+                res.status(500).send({ message: "Failed to fetch user" });
+            }
         });
 
         app.get("/users/role/:email", async (req, res) => {
-            const user = await usersCollection.findOne({ email: req.params.email });
-            if (!user) return res.status(404).send({ message: "User not found" });
-            res.send({ role: user.role || "member" });
+            try {
+                const user = await req.usersCollection.findOne({ email: req.params.email });
+                if (!user) return res.status(404).send({ message: "User not found" });
+                res.send({ role: user.role || "member" });
+            } catch (error) {
+                console.error("Failed to fetch user role:", error);
+                res.status(500).send({ message: "Failed to fetch user role" });
+            }
         });
 
         app.post("/users", async (req, res) => {
-            const { email, displayName, photoURL, lastSignInTime, role = "member" } = req.body;
-            const result = await usersCollection.updateOne(
-                { email },
-                { $set: { displayName, photoURL, lastSignInTime, role } },
-                { upsert: true }
-            );
-            res.send(result);
+            try {
+                const { email, displayName, photoURL, lastSignInTime, role = "member" } = req.body;
+                const result = await req.usersCollection.updateOne(
+                    { email },
+                    {
+                        $set: {
+                            displayName,
+                            photoURL,
+                            lastSignInTime,
+                            role,
+                        }
+                    },
+                    { upsert: true }
+                );
+                res.send(result);
+            } catch (error) {
+                console.error("Failed to create/update user:", error);
+                res.status(500).send({ message: "Failed to create/update user" });
+            }
         });
 
         app.patch("/users", async (req, res) => {
-            const { email, lastSignInTime, role } = req.body;
-            const updateFields = {};
-            if (lastSignInTime) updateFields.lastSignInTime = lastSignInTime;
-            if (role) updateFields.role = role;
-            const result = await usersCollection.updateOne({ email }, { $set: updateFields });
-            res.send(result);
-        });
+            try {
+                const { email, lastSignInTime, role } = req.body;
 
-        app.delete("/users/:email", async (req, res) => {
-            const result = await usersCollection.deleteOne({ email: { $regex: `^${req.params.email}$`, $options: "i" } });
-            if (result.deletedCount === 0) return res.status(404).send({ message: "User not found" });
-            res.send({ message: "User deleted", result });
+                if (!email) {
+                    return res.status(400).send({ message: "Email is required" });
+                }
+
+                const updateFields = {};
+                if (lastSignInTime) updateFields.lastSignInTime = lastSignInTime;
+                if (role) updateFields.role = role;
+
+                if (Object.keys(updateFields).length === 0) {
+                    return res.status(400).send({ message: "No valid fields to update" });
+                }
+
+                const result = await req.usersCollection.updateOne(
+                    { email },
+                    { $set: updateFields }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error("Failed to update user:", error);
+                res.status(500).send({ message: "Failed to update user" });
+            }
         });
 
         // ================= JWT Auth routes =================
         app.post("/register", async (req, res) => {
-            const { email, displayName, photoURL, lastSignInTime } = req.body;
-            if (!email) return res.status(400).json({ error: "Email required" });
+            try {
+                const { email, displayName, photoURL, lastSignInTime } = req.body;
+                if (!email) return res.status(400).json({ error: "Email required" });
 
-            await usersCollection.updateOne(
-                { email },
-                {
-                    $set: {
-                        email,
-                        displayName,
-                        photoURL,
-                        lastSignInTime: lastSignInTime || new Date().toISOString(),
-                        role: "member",
+                await req.usersCollection.updateOne(
+                    { email },
+                    {
+                        $set: {
+                            email,
+                            displayName,
+                            photoURL,
+                            lastSignInTime: lastSignInTime || new Date().toISOString(),
+                            role: "member",
+                        },
                     },
-                },
-                { upsert: true }
-            );
+                    { upsert: true }
+                );
 
-            const user = await usersCollection.findOne({ email });
+                const user = await req.usersCollection.findOne({ email });
 
-            const token = jwt.sign(
-                {
-                    email: user.email,
-                    role: user.role,
-                    name: user.displayName,
-                },
-                process.env.JWT_ACCESS_SECRET,
-                {
-                    expiresIn: "1h",
-                }
-            );
+                const token = jwt.sign(
+                    {
+                        email: user.email,
+                        role: user.role,
+                        name: user.displayName,
+                    },
+                    process.env.JWT_ACCESS_SECRET,
+                    { expiresIn: "1h" }
+                );
 
-
-            res.cookie("token", token, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === "production",
-                sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-                maxAge: 3600000,
-            });
-
-            res.json({ message: "User registered and logged in", user: { email: user.email, role: user.role } });
+                res.json({
+                    message: "User registered and logged in",
+                    token,
+                    user: {
+                        email: user.email,
+                        role: user.role,
+                        displayName: user.displayName,
+                    },
+                });
+            } catch (error) {
+                console.error("Registration error:", error);
+                res.status(500).json({ error: "Registration failed" });
+            }
         });
 
         app.post("/login", async (req, res) => {
-            const { email } = req.body;
-            if (!email) {
-                return res.status(400).json({ error: "Email required" });
+            try {
+                const { email } = req.body;
+                if (!email) return res.status(400).json({ error: "Email required" });
+
+                const user = await req.usersCollection.findOne({ email });
+                if (!user) return res.status(401).json({ error: "User not found" });
+
+                const token = jwt.sign(
+                    {
+                        email: user.email,
+                        role: user.role,
+                        name: user.displayName || "Anonymous",
+                    },
+                    process.env.JWT_ACCESS_SECRET,
+                    { expiresIn: "1h" }
+                );
+
+                res.json({
+                    message: "Login successful",
+                    token,
+                    user: {
+                        email: user.email,
+                        role: user.role,
+                        displayName: user.displayName,
+                    },
+                });
+            } catch (error) {
+                console.error("Login error:", error);
+                res.status(500).json({ error: "Login failed" });
             }
-
-            const user = await usersCollection.findOne({ email });
-
-            if (!user) {
-                return res.status(401).json({ error: "User not found" });
-            }
-
-            // ✅ Include name in the JWT payload
-            const token = jwt.sign(
-                {
-                    email: user.email,
-                    role: user.role,
-                    name: user.displayName || "Anonymous", // Include the name
-                },
-                process.env.JWT_ACCESS_SECRET,
-                {
-                    expiresIn: "1h",
-                }
-            );
-
-            // Set cookie
-            res.cookie("token", token, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === "production",
-                sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-                maxAge: 3600000,
-            });
-
-            // Return response
-            res.json({
-                message: "Login successful",
-                user: {
-                    email: user.email,
-                    role: user.role,
-                    displayName: user.displayName,
-                },
-            });
         });
 
         app.post("/logout", (req, res) => {
-            res.clearCookie("token", {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === "production",
-                sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-            });
             res.json({ message: "Logged out" });
         });
 
         // ================= Bookings =================
         // Get all bookings with user data (admin only)
-        app.get("/bookings", verifyJWT, verifyAdmin, async (req, res) => {
+        app.get("/bookings", verifyAdmin, async (req, res) => {
             try {
-                const bookings = await bookingsCollection.aggregate([
+                const bookings = await req.bookingsCollection.aggregate([
                     {
                         $lookup: {
                             from: "users",
@@ -489,7 +614,17 @@ async function run() {
                     },
                     { $unwind: "$userDetails" },
                     {
+                        $lookup: {
+                            from: "trainers",
+                            localField: "trainerId",
+                            foreignField: "_id",
+                            as: "trainerDetails",
+                        },
+                    },
+                    { $unwind: "$trainerDetails" },
+                    {
                         $project: {
+                            email: 1,
                             trainerId: 1,
                             slotId: 1,
                             slotName: 1,
@@ -503,15 +638,19 @@ async function run() {
                             transactionId: 1,
                             paymentStatus: 1,
                             createdAt: 1,
+                            updatedAt: 1,
                             userName: "$userDetails.displayName",
                             userEmail: "$userDetails.email",
                             userPhotoURL: "$userDetails.photoURL",
                             userRole: "$userDetails.role",
                             userLastSignInTime: "$userDetails.lastSignInTime",
+                            trainerName: "$trainerDetails.name",
+                            trainerEmail: "$trainerDetails.email",
+                            trainerImage: "$trainerDetails.image",
+                            trainerSpecialization: "$trainerDetails.specialization",
                         },
                     },
-                ]).toArray();
-
+                ]).toArray(); // .toArray() is necessary for native driver aggregate
                 res.send(bookings);
             } catch (error) {
                 console.error("Failed to fetch bookings:", error);
@@ -520,7 +659,7 @@ async function run() {
         });
 
         // Get bookings by user email (self or admin)
-        app.get("/bookings/user/:email", verifyJWT, async (req, res) => {
+        app.get("/bookings/user/:email", verifyFBToken, async (req, res) => {
             const email = req.params.email;
 
             if (req.decoded.role !== "admin" && req.decoded.email !== email) {
@@ -528,7 +667,7 @@ async function run() {
             }
 
             try {
-                const bookings = await bookingsCollection.aggregate([
+                const bookings = await req.bookingsCollection.aggregate([
                     { $match: { email } },
                     {
                         $lookup: {
@@ -540,7 +679,17 @@ async function run() {
                     },
                     { $unwind: "$userDetails" },
                     {
+                        $lookup: {
+                            from: "trainers",
+                            localField: "trainerId",
+                            foreignField: "_id",
+                            as: "trainerDetails",
+                        },
+                    },
+                    { $unwind: "$trainerDetails" },
+                    {
                         $project: {
+                            email: 1,
                             trainerId: 1,
                             slotId: 1,
                             slotName: 1,
@@ -554,11 +703,16 @@ async function run() {
                             transactionId: 1,
                             paymentStatus: 1,
                             createdAt: 1,
+                            updatedAt: 1,
                             userName: "$userDetails.displayName",
                             userEmail: "$userDetails.email",
                             userPhotoURL: "$userDetails.photoURL",
                             userRole: "$userDetails.role",
                             userLastSignInTime: "$userDetails.lastSignInTime",
+                            trainerName: "$trainerDetails.name",
+                            trainerEmail: "$trainerDetails.email",
+                            trainerImage: "$trainerDetails.image",
+                            trainerSpecialization: "$trainerDetails.specialization",
                         },
                     },
                 ]).toArray();
@@ -566,213 +720,279 @@ async function run() {
                 res.send(bookings);
             } catch (error) {
                 console.error("Failed to fetch user bookings:", error);
-                res.status(500).send({ error: "Failed to fetch user bookings" });
+                res.status(500).send({ error: "Failed to fetch bookings" });
             }
         });
 
-        // Create a booking (authenticated user)
-        app.post("/bookings", verifyJWT, async (req, res) => {
+        // Create a booking
+        app.post('/bookings', verifyFBToken, async (req, res) => {
             try {
-                let booking = req.body;
-                booking.email = req.decoded.email;
-                booking.createdAt = new Date().toISOString();
-                booking.paymentStatus = booking.paymentStatus || "pending";
+                const { email, trainerId, slotId, slotName, slotTime, slotDay, packageId, packageName, packagePrice, sessionType, price, transactionId, paymentStatus } = req.body;
 
-                // Get user info
-                const user = await usersCollection.findOne({ email: booking.email });
+                // Input validation (basic)
+                if (!email || !trainerId || !slotId || !price || !transactionId) {
+                    return res.status(400).json({ message: 'Missing required booking data.' });
+                }
 
-                // Get trainer info
-                const trainer = await trainerCollection.findOne({ _id: new ObjectId(booking.trainerId) });
-                if (!trainer) return res.status(400).send({ error: "Trainer not found" });
+                // Check if user is trying to book for themselves
+                if (req.decoded.email !== email) {
+                    return res.status(403).json({ message: 'Forbidden: You can only book for your own account.' });
+                }
 
-                // Find slot info inside trainer
-                const slot = trainer.slots.find((s) => s.id === booking.slotId);
-                if (!slot) return res.status(400).send({ error: "Slot not found" });
-
-                // Package info (static)
-                const packages = [
-                    { id: "basic", name: "Basic Membership", price: 10, sessionType: "Group Training" },
-                    { id: "standard", name: "Standard Membership", price: 50, sessionType: "Group & Personal Training" },
-                    { id: "premium", name: "Premium Membership", price: 100, sessionType: "Personal Training" },
-                ];
-
-                const pkg = packages.find((p) => p.id === booking.packageId);
-                if (!pkg) return res.status(400).send({ error: "Package not found" });
-
-                // Enrich booking
-                booking = {
-                    ...booking,
-                    clientName: user?.displayName || "Unknown",
-                    clientInitial: user?.displayName ? user.displayName.charAt(0) : "U",
-                    clientPhotoURL: user?.photoURL || "",
-                    slotName: slot.name,
-                    slotTime: slot.time,
-                    slotDay: slot.day,
-                    packageName: pkg.name,
-                    packagePrice: pkg.price,
-                    sessionType: pkg.sessionType,
+                // Prepare booking document
+                const bookingDocument = {
+                    email,
+                    trainerId: new ObjectId(trainerId), // Ensure trainerId is an ObjectId
+                    slotId,
+                    slotName,
+                    slotTime: slotTime || null,
+                    slotDay: slotDay || null,
+                    packageId: packageId || null,
+                    packageName: packageName || null,
+                    packagePrice: packagePrice || null,
+                    sessionType: sessionType || null,
+                    price,
+                    transactionId,
+                    paymentStatus: paymentStatus || "paid",
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
                 };
 
-                // Insert booking
-                const result = await bookingsCollection.insertOne(booking);
+                // Insert the new booking
+                const bookingResult = await req.bookingsCollection.insertOne(bookingDocument);
+                const newBooking = { _id: bookingResult.insertedId, ...bookingDocument }; // Construct the inserted doc
 
-                // Mark slot as booked
-                await trainerCollection.updateOne(
-                    { _id: new ObjectId(booking.trainerId), "slots.id": booking.slotId },
-                    { $set: { "slots.$.isBooked": true } }
+                // Find the trainer and update the slot status
+                const trainer = await req.trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+
+                if (!trainer) {
+                    // Rollback the booking if trainer is not found
+                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    return res.status(404).json({ message: 'Trainer not found.' });
+                }
+
+                // Find the index of the slot to update
+                const slotIndex = trainer.slots.findIndex(slot => slot.id === slotId);
+
+                if (slotIndex === -1) {
+                    // Rollback the booking if slot is not found
+                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    return res.status(404).json({ message: 'Slot not found for this trainer.' });
+                }
+
+                if (trainer.slots[slotIndex].isBooked) {
+                    // This is a race condition. If already booked, prevent double booking
+                    // Rollback the newBooking
+                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    return res.status(409).json({ message: 'Slot is already booked.' });
+                }
+
+                // Update the specific slot's isBooked status
+                const updateTrainerResult = await req.trainerCollection.updateOne(
+                    { "_id": new ObjectId(trainerId), "slots.id": slotId },
+                    {
+                        "$set": {
+                            "slots.$.isBooked": true, // Using positional operator to update the matched element
+                            "updatedAt": new Date()
+                        }
+                    }
                 );
 
-                res.status(201).send({ message: "Booking created", bookingId: result.insertedId });
-            } catch (error) {
-                console.error("Failed to create booking:", error);
-                res.status(500).send({ error: "Failed to create booking" });
-            }
-        });
-
-        // ================= Stripe Payment Intent =================
-        app.post("/create-payment-intent", async (req, res) => {
-            const { price } = req.body;
-            if (!price) return res.status(400).send({ error: "Price is required" });
-
-            try {
-                const paymentIntent = await stripe.paymentIntents.create({
-                    amount: price * 100,
-                    currency: "usd",
-                    payment_method_types: ["card"],
-                });
-                res.send({ clientSecret: paymentIntent.client_secret });
-            } catch (err) {
-                console.error("Stripe error:", err);
-                res.status(500).send({ error: "Failed to create payment intent" });
-            }
-        });
-
-        // ================= Payment Routes (with JWT auth) =================
-
-        // Get all payments (admin only)
-        app.get("/payments", verifyJWT, verifyAdmin, async (req, res) => {
-            try {
-                const payments = await paymentsCollection.find().toArray();
-                res.send(payments);
-            } catch (error) {
-                console.error("Failed to fetch payments:", error);
-                res.status(500).send({ error: "Failed to fetch payments" });
-            }
-        });
-
-        // Get payment by payment ID (admin or owner)
-        app.get("/payments/:id", verifyJWT, async (req, res) => {
-            const paymentId = req.params.id;
-
-            try {
-                const payment = await paymentsCollection.findOne({ _id: new ObjectId(paymentId) });
-                if (!payment) return res.status(404).send({ message: "Payment not found" });
-
-                if (req.decoded.role !== "admin" && req.decoded.email !== payment.email) {
-                    return res.status(403).send({ message: "Forbidden: Access denied" });
+                if (updateTrainerResult.modifiedCount === 0) {
+                    // If for some reason the slot wasn't updated (e.g., another process changed it)
+                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    return res.status(500).json({ message: 'Failed to update trainer slot status.' });
                 }
 
-                res.send(payment);
+                res.status(201).json({ message: 'Booking successful and slot updated!', booking: newBooking });
+
             } catch (error) {
-                console.error("Failed to fetch payment:", error);
-                res.status(500).send({ error: "Failed to fetch payment" });
+                console.error('Booking creation or slot update error:', error);
+                res.status(500).json({ message: 'Failed to create booking or update slot.', error: error.message });
             }
         });
 
-        // Get payments by user email (self or admin)
-        app.get("/payments/user/:email", verifyJWT, async (req, res) => {
-            const email = req.params.email;
-
-            if (req.decoded.role !== "admin" && req.decoded.email !== email) {
-                return res.status(403).send({ message: "Forbidden: Cannot access other user's payments" });
-            }
-
+        // Update booking payment status and transactionId
+        app.patch("/bookings/:id", verifyFBToken, async (req, res) => {
             try {
-                const userPayments = await paymentsCollection.find({ email }).toArray();
-                res.send(userPayments);
-            } catch (error) {
-                console.error("Failed to fetch user payments:", error);
-                res.status(500).send({ error: "Failed to fetch user payments" });
-            }
-        });
+                const id = req.params.id;
+                const { transactionId, paymentStatus } = req.body;
 
-        // Add payment record (authenticated user)
-        app.post("/payments", verifyJWT, async (req, res) => {
-            const paymentData = req.body;
+                const booking = await req.bookingsCollection.findOne({ _id: new ObjectId(id) });
+                if (!booking) return res.status(404).send({ message: "Booking not found" });
 
-            // Force payment email to logged-in user's email
-            paymentData.email = req.decoded.email;
-
-            try {
-                const result = await paymentsCollection.insertOne(paymentData);
-                res.status(201).send(result);
-            } catch (error) {
-                console.error("Failed to save payment:", error);
-                res.status(500).send({ error: "Failed to save payment" });
-            }
-        });
-
-        // Update payment by ID (admin or owner)
-        app.patch("/payments/:id", verifyJWT, async (req, res) => {
-            const paymentId = req.params.id;
-            const updateFields = req.body;
-
-            try {
-                const payment = await paymentsCollection.findOne({ _id: new ObjectId(paymentId) });
-                if (!payment) return res.status(404).send({ message: "Payment not found" });
-
-                if (req.decoded.role !== "admin" && req.decoded.email !== payment.email) {
-                    return res.status(403).send({ message: "Forbidden: Access denied" });
+                // Allow user to update their own booking's payment status, or admin can
+                if (booking.email !== req.decoded.email && req.decoded.role !== "admin") {
+                    return res.status(403).send({ message: "Forbidden: Cannot update others' bookings" });
                 }
 
-                const result = await paymentsCollection.updateOne(
-                    { _id: new ObjectId(paymentId) },
-                    { $set: updateFields }
+                const result = await req.bookingsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { transactionId, paymentStatus, updatedAt: new Date() } }
                 );
 
                 res.send(result);
             } catch (error) {
-                console.error("Failed to update payment:", error);
-                res.status(500).send({ error: "Failed to update payment" });
+                console.error("Failed to update booking:", error);
+                res.status(500).send({ message: "Failed to update booking" });
             }
         });
 
-        // Delete payment by ID (admin or owner)
-        app.delete("/payments/:id", verifyJWT, async (req, res) => {
-            const paymentId = req.params.id;
+        // ================= Payments =================
+        app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
+            const { amount } = req.body;
+
+            if (!amount || amount <= 0) {
+                return res.status(400).send({ message: "Invalid payment amount" });
+            }
 
             try {
-                const payment = await paymentsCollection.findOne({ _id: new ObjectId(paymentId) });
-                if (!payment) return res.status(404).send({ message: "Payment not found" });
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: Math.round(amount * 100), // Stripe expects amount in cents
+                    currency: "usd",
+                    payment_method_types: ["card"],
+                });
 
-                if (req.decoded.role !== "admin" && req.decoded.email !== payment.email) {
-                    return res.status(403).send({ message: "Forbidden: Access denied" });
-                }
-
-                const result = await paymentsCollection.deleteOne({ _id: new ObjectId(paymentId) });
-                res.send({ message: "Payment deleted", result });
+                res.send({ clientSecret: paymentIntent.client_secret });
             } catch (error) {
-                console.error("Failed to delete payment:", error);
-                res.status(500).send({ error: "Failed to delete payment" });
+                console.error("Stripe payment intent error:", error);
+                res.status(500).send({ message: "Failed to create payment intent" });
             }
         });
 
-        // Confirm DB connection
-        await db.command({ ping: 1 });
-        console.log("Connected to MongoDB and server running.");
-    } catch (error) {
-        console.error("MongoDB connection failed:", error);
+        // Store payment info after success
+        app.post("/payments", verifyFBToken, async (req, res) => {
+            try {
+                const payment = {
+                    ...req.body,
+                    email: req.decoded.email,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                const result = await req.paymentsCollection.insertOne(payment);
+                res.status(201).send(result);
+            } catch (error) {
+                console.error("Failed to store payment:", error);
+                res.status(500).send({ message: "Failed to store payment" });
+            }
+        });
+
+        // Application related routes (Trainer Application)
+        app.post("/applications/trainer", verifyFBToken, async (req, res) => {
+            try {
+                const {
+                    email,
+                    name,
+                    age,
+                    experience,
+                    photoURL,
+                    specialization,
+                    description,
+                    certifications,
+                    availableSlots,
+                    availableDays,
+                    sessions,
+                    social,
+                } = req.body;
+
+                const existingApplication = await req.applicationsCollection.findOne({ email });
+                if (existingApplication) {
+                    return res.status(409).send({ message: "You have already submitted a trainer application." });
+                }
+
+                if (req.decoded.email !== email) {
+                    return res.status(403).send({ message: "Forbidden: Cannot apply for others." });
+                }
+
+                const newApplication = {
+                    email,
+                    name,
+                    age,
+                    experience,
+                    photoURL,
+                    specialization,
+                    description,
+                    certifications: certifications || [],
+                    availableSlots: availableSlots || [],
+                    availableDays: availableDays || [],
+                    sessions: sessions || 0,
+                    social: social || { instagram: '', twitter: '', linkedin: '' },
+                    role: "trainer",
+                    status: "pending",
+                    appliedAt: new Date(),
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                const result = await req.applicationsCollection.insertOne(newApplication);
+                res.status(201).send(result);
+            } catch (error) {
+                console.error("Error submitting trainer application:", error);
+                res.status(500).send({ message: "Failed to submit application." });
+            }
+        });
+
+        app.delete("/applications/trainer/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { feedback } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ message: "Invalid application ID." });
+                }
+
+                const query = { _id: new ObjectId(id) };
+                const applicationToDelete = await req.applicationsCollection.findOne(query);
+
+                if (!applicationToDelete) {
+                    return res.status(404).send({ message: "Application not found." });
+                }
+
+                const result = await req.applicationsCollection.deleteOne(query);
+
+                if (result.deletedCount === 1) {
+                    if (feedback) {
+                        console.log(`Application ${id} rejected with feedback: ${feedback}`);
+                    }
+                    res.send({ message: "Application deleted successfully." });
+                } else {
+                    res.status(500).send({ message: "Failed to delete application." });
+                }
+            } catch (error) {
+                console.error("Error deleting trainer application:", error);
+                res.status(500).send({ message: "Failed to delete application." });
+            }
+        });
+
+        // Get all trainer applications (Admin only)
+        app.get("/applications/trainer", verifyFBToken, verifyAdmin, async (req, res) => {
+            try {
+                const applications = await req.applicationsCollection.find({}).toArray();
+                res.send(applications);
+            } catch (error) {
+                console.error("Error fetching trainer applications:", error);
+                res.status(500).send({ message: "Failed to fetch applications." });
+            }
+        });
+
+        // Send a ping to confirm a successful connection
+        // await client.db("admin").command({ ping: 1 });
+        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    } finally {
+        // Ensures that the client will close when you finish/error
+        // await client.close(); // Only close if you want to explicitly disconnect
     }
 }
 
+// Call the run function to connect to DB and start the server
 run().catch(console.dir);
 
-// Root route
+
 app.get("/", (req, res) => {
-    res.send("FitFlow server is up and running.");
+    res.send("FitFlow Backend Server Running");
 });
 
-// Start server
 app.listen(port, () => {
-    console.log(`Server listening at http://localhost:${port}`);
+    console.log(`FitFlow Backend Server Running on port ${port}`);
 });
