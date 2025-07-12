@@ -323,7 +323,17 @@ async function run() {
         });
 
         // ================= Community Routes =================
-        app.get('/community', async (req, res) => {
+        app.get("/community", async (req, res) => {
+            try {
+                const posts = await communityCollection.find().sort({ createdAt: -1 }).toArray();
+                res.status(200).send(posts);
+            } catch (error) {
+                console.error("Error fetching community posts:", error);
+                res.status(500).send({ message: "Failed to fetch posts." });
+            }
+        });
+        
+        app.get('/community/pagination', async (req, res) => {
             try {
                 const page = parseInt(req.query.page);
                 const limit = parseInt(req.query.limit);
@@ -651,26 +661,17 @@ async function run() {
             }
         });
 
-        // Admin-only route to update user roles or other user data
-        app.patch("/users", verifyFBToken, verifyAdmin, async (req, res) => { // Added verifyAdmin middleware
+        app.patch("/users", verifyFBToken, async (req, res) => {
             try {
                 const { email, lastSignInTime, role } = req.body;
-                // const authenticatedEmail = req.decoded.email; // No longer needed for this check as verifyAdmin ensures admin role
 
                 if (!email) {
                     return res.status(400).send({ message: "Email is required for update." });
                 }
 
-                // The verifyAdmin middleware already ensures the requester is an admin.
-                // Thus, an admin is performing this action, and they are allowed to change roles.
-                // The previous conditional check `if (authenticatedEmail !== email && req.decoded.role !== "admin")`
-                // is no longer necessary here because verifyAdmin guarantees `req.decoded.role === "admin"`.
-
                 const updateFields = { updatedAt: new Date() };
                 if (lastSignInTime) updateFields.lastSignInTime = lastSignInTime;
 
-                // Since verifyAdmin is already applied, we know the requester has admin privileges.
-                // Therefore, if a 'role' is provided in the request body, it can be applied.
                 if (role) {
                     updateFields.role = role;
                 }
