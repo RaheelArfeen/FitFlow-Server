@@ -1,28 +1,23 @@
-// imports
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const dotenv = require("dotenv");
 dotenv.config();
 
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb"); // Keep ObjectId from mongodb
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Firebase Admin Init
-// Make sure firebase-service-account.json is in the same directory as index.js
 const serviceAccount = require("./firebase-service-account.json");
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
 });
 
-// Mongo URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.hqacvhm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
     serverApi: {
         version: ServerApiVersion.v1,
@@ -31,17 +26,16 @@ const client = new MongoClient(uri, {
     }
 });
 
-// Middleware
 app.use(
     cors({
-        origin: ["http://localhost:5173", "https://your-frontend-domain.com"], // Add your production frontend URL here
+        origin: ["http://localhost:5173", "https://your-frontend-domain.com"],
         credentials: true,
     })
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ================= Middleware Utils =================
+// ================= Verify Firebase Token =================
 const verifyFBToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
@@ -53,32 +47,38 @@ const verifyFBToken = async (req, res, next) => {
         req.decoded = decoded;
         next();
     } catch (error) {
-        console.error("Firebase token verification error:", error); // Log error for debugging
+        console.error("Firebase token verification error:", error);
         res.status(403).send({ message: "Forbidden: Invalid Firebase token" });
     }
 };
 
-
+// ================= Verify Admin Role =================
 const verifyAdmin = async (req, res, next) => {
-    const email = req.decoded?.email;
-
-    const user = await req.usersCollection.findOne({ email });
-
-    if (!user || user.role !== "admin") {
-        return res.status(403).send({ message: "Forbidden: Not an admin" });
+    if (!req.decoded || !req.decoded.email) {
+        return res.status(401).send({ message: "Unauthorized: User not authenticated via Firebase" });
     }
 
-    next();
+    const email = req.decoded.email;
+    const usersCollection = client.db("fitflowDB").collection("users");
+
+    try {
+        const user = await usersCollection.findOne({ email });
+
+        if (!user || user.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden: Not an admin" });
+        }
+        next();
+    } catch (error) {
+        console.error("Error verifying admin role:", error);
+        res.status(500).send({ message: "Internal server error during role verification." });
+    }
 };
 
-
-// ================= MongoDB connection and routes =================
 async function run() {
     try {
-        // Connect the client to the server (optional starting in v4.7)
         await client.connect();
-        // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
+        console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         const db = client.db("fitflowDB");
         const usersCollection = db.collection("users");
@@ -86,23 +86,18 @@ async function run() {
         const bookingsCollection = db.collection("bookings");
         const paymentsCollection = db.collection("payments");
         const communityCollection = db.collection("community");
-        const applicationsCollection = db.collection("applications"); // For trainer applications
 
-        // Global middleware to attach collections to request object
-        app.use((req, res, next) => {
-            req.usersCollection = usersCollection;
-            req.trainerCollection = trainerCollection;
-            req.bookingsCollection = bookingsCollection;
-            req.paymentsCollection = paymentsCollection;
-            req.communityCollection = communityCollection;
-            req.applicationsCollection = applicationsCollection;
-            next();
-        });
-
-        // ================= Trainers routes =================
+        // ================= Trainer Routes =================
         app.get("/trainers", async (req, res) => {
             try {
-                const trainers = await req.trainerCollection.find({}).toArray();
+                const { status } = req.query;
+                let query = {};
+
+                if (status) {
+                    query.status = status;
+                }
+
+                const trainers = await trainerCollection.find(query).toArray();
                 res.send(trainers);
             } catch (error) {
                 console.error("Failed to fetch trainers:", error);
@@ -110,37 +105,126 @@ async function run() {
             }
         });
 
-        // Add a new trainer (from approved application)
-        app.post("/trainers", async (req, res) => {
+        app.post("/trainers", verifyFBToken, async (req, res) => {
             try {
-                const trainerData = req.body;
+                const {
+                    email,
+                    name,
+                    age,
+                    experience,
+                    photoURL,
+                    specialization,
+                    description,
+                    certifications,
+                    sessions,
+                    social,
+                    slots
+                } = req.body;
 
-                console.log("Received trainer data:", trainerData);
-
-                // Basic validation
-                if (!trainerData?.email || !trainerData?.name) {
-                    return res.status(400).send({ message: "Missing required trainer fields." });
+                if (!email || !name || !specialization || !description || !photoURL) {
+                    return res.status(400).send({ message: "Missing required application fields (email, name, specialization, description, photoURL)." });
+                }
+                if (!Array.isArray(slots)) {
+                    return res.status(400).send({ message: "Slots must be an array for trainer application." });
+                }
+                if (req.decoded.email !== email) {
+                    return res.status(403).send({ message: "Forbidden: You can only submit a trainer application for your own account." });
                 }
 
-                const newTrainer = {
-                    ...trainerData,
+                const existingTrainer = await trainerCollection.findOne({ email });
+                if (existingTrainer) {
+                    return res.status(409).send({ message: "A trainer profile (or application) already exists for this email." });
+                }
+
+                const newTrainerApplication = {
+                    email,
+                    name,
+                    age: age || null,
+                    experience: experience || 0,
+                    photoURL,
+                    specialization,
+                    description,
+                    certifications: certifications || [],
+                    sessions: sessions || 0,
+                    social: social || { instagram: '', twitter: '', linkedin: '' },
+                    rating: 0,
+                    ratings: [],
+                    slots: slots || [],
                     role: "trainer",
-                    status: "accepted",
+                    status: "pending",
+                    appliedAt: new Date(),
                     createdAt: new Date(),
                     updatedAt: new Date(),
                 };
 
-                const result = await req.trainerCollection.insertOne(newTrainer);
-                res.status(201).send(result);
+                const result = await trainerCollection.insertOne(newTrainerApplication);
+                res.status(201).send({ message: "Trainer application submitted successfully. Awaiting approval.", insertedId: result.insertedId });
             } catch (error) {
-                console.error("Error adding new trainer:", error.message, error.stack);
-                res.status(500).send({ message: "Failed to add trainer." });
+                console.error("Error submitting trainer application:", error.message, error.stack);
+                res.status(500).send({ message: "Failed to submit trainer application." });
+            }
+        });
+
+        app.patch("/trainers/:id/status", verifyFBToken, verifyAdmin, async (req, res) => {
+            try {
+                const trainerId = req.params.id;
+                const { status, feedback } = req.body;
+
+                if (!ObjectId.isValid(trainerId)) {
+                    return res.status(400).send({ message: "Invalid trainer ID format." });
+                }
+                if (!["accepted", "rejected"].includes(status)) {
+                    return res.status(400).send({ message: "Invalid status provided. Must be 'accepted' or 'rejected'." });
+                }
+
+                const updateDoc = {
+                    $set: {
+                        status: status,
+                        updatedAt: new Date(),
+                    }
+                };
+                if (feedback) {
+                    updateDoc.$set.adminFeedback = feedback;
+                }
+
+                if (status === "accepted") {
+                    const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+                    if (trainer && trainer.email) {
+                        await usersCollection.updateOne(
+                            { email: trainer.email },
+                            { $set: { role: "trainer", updatedAt: new Date() } }
+                        );
+                    }
+                } else if (status === "rejected") {
+                    const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+                    if (trainer && trainer.email) {
+                        await usersCollection.updateOne(
+                            { email: trainer.email },
+                            { $set: { role: "member", updatedAt: new Date() } }
+                        );
+                    }
+                }
+
+                const result = await trainerCollection.updateOne(
+                    { _id: new ObjectId(trainerId) },
+                    updateDoc
+                );
+
+                if (result.modifiedCount === 0) {
+                    return res.status(404).send({ message: "Trainer not found or status already set." });
+                }
+
+                res.send({ message: `Trainer status updated to ${status}.` });
+
+            } catch (error) {
+                console.error("Error updating trainer status:", error);
+                res.status(500).send({ message: "Failed to update trainer status." });
             }
         });
 
         app.get("/trainers/:id", async (req, res) => {
             try {
-                const trainer = await req.trainerCollection.findOne({ _id: new ObjectId(req.params.id) });
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(req.params.id) });
                 if (!trainer) return res.status(404).send({ message: "Trainer not found" });
                 res.send(trainer);
             } catch (error) {
@@ -149,13 +233,13 @@ async function run() {
             }
         });
 
-        // ========== Trainer Ratings ==========
+        // ================= Trainer Rating Routes =================
         app.get("/trainers/rating/:id", verifyFBToken, async (req, res) => {
             const trainerId = req.params.id;
             const userEmail = req.decoded.email;
 
             try {
-                const trainer = await req.trainerCollection.findOne(
+                const trainer = await trainerCollection.findOne(
                     { _id: new ObjectId(trainerId) },
                     { projection: { ratings: 1, rating: 1 } }
                 );
@@ -184,21 +268,34 @@ async function run() {
             const { rating } = req.body;
             const userEmail = req.decoded.email;
 
+            if (typeof rating !== 'number' || rating < 1 || rating > 5) {
+                return res.status(400).send({ success: false, message: "Rating must be a number between 1 and 5." });
+            }
+
             try {
-                const trainer = await req.trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
 
                 if (!trainer) {
                     return res.status(404).send({ success: false, message: "Trainer not found" });
                 }
 
+                if (trainer.status !== 'accepted') {
+                    return res.status(403).send({ success: false, message: "This trainer is not yet active or is no longer accepting ratings." });
+                }
+
                 const alreadyRated = trainer.ratings?.find((r) => r.email === userEmail);
                 if (alreadyRated) {
-                    return res.send({ success: false, message: "You already rated this trainer." });
+                    return res.status(409).send({ success: false, message: "You already rated this trainer." });
                 }
+
+                const user = await usersCollection.findOne({ email: userEmail });
+                const userName = user?.displayName || "Anonymous User";
+                const userPhoto = user?.photoURL || "";
 
                 const newRating = {
                     email: userEmail,
-                    name: req.decoded.name || "Anonymous",
+                    name: userName,
+                    photoURL: userPhoto,
                     rating,
                     date: new Date(),
                 };
@@ -207,13 +304,13 @@ async function run() {
                 const avgRating =
                     updatedRatings.reduce((sum, r) => sum + r.rating, 0) / updatedRatings.length;
 
-                const result = await req.trainerCollection.updateOne(
+                const result = await trainerCollection.updateOne(
                     { _id: new ObjectId(trainerId) },
                     {
                         $set: {
                             ratings: updatedRatings,
                             rating: avgRating,
-                            updatedAt: new Date(), // Update timestamp
+                            updatedAt: new Date(),
                         },
                     }
                 );
@@ -225,10 +322,10 @@ async function run() {
             }
         });
 
-        // ================= Community routes ====================
+        // ================= Community Routes =================
         app.get('/community', async (req, res) => {
             try {
-                const posts = await req.communityCollection.find().sort({ createdAt: -1 }).toArray();
+                const posts = await communityCollection.find().sort({ createdAt: -1 }).toArray();
                 res.send(posts);
             } catch (error) {
                 console.error('Error fetching community posts:', error);
@@ -239,10 +336,18 @@ async function run() {
         app.get('/community/:id', async (req, res) => {
             try {
                 const id = req.params.id;
-                const post = await req.communityCollection.findOne({ _id: new ObjectId(id) });
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ message: "Invalid post ID format." });
+                }
+
+                const post = await communityCollection.findOne({ _id: new ObjectId(id) });
 
                 if (!post) {
                     return res.status(404).send({ message: 'Post not found.' });
+                }
+
+                if (post.comments && post.comments.length > 0) {
+                    post.comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
                 }
 
                 res.send(post);
@@ -254,26 +359,37 @@ async function run() {
 
         app.post("/community", verifyFBToken, async (req, res) => {
             try {
-                const { title, content, category, tags, author, authorPhoto, authorRole, email } = req.body;
+                const { title, content, category, tags } = req.body;
+
+                if (!title || !content || !category) {
+                    return res.status(400).send({ message: "Title, content, and category are required for a post." });
+                }
+
+                const userEmail = req.decoded.email;
+                const user = await usersCollection.findOne({ email: userEmail });
+
+                if (!user) {
+                    return res.status(404).send({ message: "User not found." });
+                }
 
                 const post = {
                     title,
                     content,
                     category,
-                    tags: tags || [], // Ensure tags is an array
-                    author,
-                    authorPhoto,
-                    authorRole,
-                    email,
+                    tags: tags || [],
+                    author: user.displayName || "Anonymous",
+                    authorPhoto: user.photoURL || "",
+                    authorRole: user.role || "member",
+                    email: user.email,
                     createdAt: new Date(),
                     updatedAt: new Date(),
                     likes: 0,
                     dislikes: 0,
                     comments: [],
-                    votes: [], // Initialize votes array
+                    votes: [],
                 };
 
-                const result = await req.communityCollection.insertOne(post);
+                const result = await communityCollection.insertOne(post);
                 res.status(201).send({ insertedId: result.insertedId, message: "Post added successfully" });
             } catch (error) {
                 console.error("Error adding post:", error);
@@ -287,15 +403,19 @@ async function run() {
                 const { commentText } = req.body;
                 const userEmail = req.decoded.email;
 
+                if (!ObjectId.isValid(postId)) {
+                    return res.status(400).send({ message: "Invalid post ID format." });
+                }
+
                 if (!commentText || commentText.trim() === "") {
                     return res.status(400).send({ message: "Comment text is required" });
                 }
 
-                const user = await req.usersCollection.findOne({ email: userEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
                 if (!user) return res.status(404).send({ message: "User not found" });
 
                 const newComment = {
-                    _id: new ObjectId(), // Unique ID for comment
+                    _id: new ObjectId(),
                     text: commentText,
                     author: user.displayName || "Anonymous",
                     authorPhoto: user.photoURL || "",
@@ -304,12 +424,11 @@ async function run() {
                     createdAt: new Date(),
                 };
 
-                // Add comment and update updatedAt
-                const result = await req.communityCollection.updateOne(
+                const result = await communityCollection.updateOne(
                     { _id: new ObjectId(postId) },
                     {
                         $push: { comments: newComment },
-                        $set: { updatedAt: new Date() } // update post timestamp
+                        $set: { updatedAt: new Date() }
                     }
                 );
 
@@ -317,8 +436,7 @@ async function run() {
                     return res.status(404).send({ message: "Post not found or comment not added" });
                 }
 
-                // Return updated post with sorted comments (newest first)
-                const updatedPost = await req.communityCollection.findOne({ _id: new ObjectId(postId) });
+                const updatedPost = await communityCollection.findOne({ _id: new ObjectId(postId) });
 
                 if (updatedPost?.comments?.length) {
                     updatedPost.comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -338,45 +456,44 @@ async function run() {
         app.delete("/community/:postId/comments/:commentId", verifyFBToken, async (req, res) => {
             try {
                 const { postId, commentId } = req.params;
-                const userEmail = req.decoded.email; // Email of the currently authenticated user
+                const userEmail = req.decoded.email;
 
-                // 1. Find the post
-                const post = await req.communityCollection.findOne({ _id: new ObjectId(postId) });
+                if (!ObjectId.isValid(postId) || !ObjectId.isValid(commentId)) {
+                    return res.status(400).send({ message: "Invalid post or comment ID format." });
+                }
+
+                const post = await communityCollection.findOne({ _id: new ObjectId(postId) });
 
                 if (!post) {
                     return res.status(404).send({ message: "Post not found." });
                 }
 
-                // 2. Find the comment within the post's comments array
                 const commentIndex = post.comments.findIndex(
-                    (comment) => comment._id.toString() === commentId // Convert ObjectId to string for comparison
+                    (comment) => comment._id.toString() === commentId
                 );
 
                 if (commentIndex === -1) {
                     return res.status(404).send({ message: "Comment not found on this post." });
                 }
 
-                // 3. Authorization check: Ensure the user trying to delete is the comment author
-                if (post.comments[commentIndex].email !== userEmail) {
-                    return res.status(403).send({ message: "Forbidden: You are not the author of this comment." });
+                const isAdmin = req.decoded.role === "admin";
+                if (post.comments[commentIndex].email !== userEmail && !isAdmin) {
+                    return res.status(403).send({ message: "Forbidden: You are not the author of this comment and not an admin." });
                 }
 
-                // 4. Remove the comment from the array
                 post.comments.splice(commentIndex, 1);
 
-                // 5. Update the post in the database
-                const result = await req.communityCollection.updateOne(
+                const result = await communityCollection.updateOne(
                     { _id: new ObjectId(postId) },
                     {
                         $set: {
                             comments: post.comments,
-                            updatedAt: new Date(), // Update the post's last modified timestamp
+                            updatedAt: new Date(),
                         },
                     }
                 );
 
                 if (result.modifiedCount === 0) {
-                    // This might happen if the post was found but not updated for some reason (e.g., no actual change)
                     return res.status(500).send({ message: "Failed to delete comment: No changes made." });
                 }
 
@@ -392,8 +509,12 @@ async function run() {
                 const { postId, voteType } = req.body;
                 const email = req.decoded.email;
 
-                if (!postId || !["like", "dislike", null].includes(voteType)) {
-                    return res.status(400).json({ message: "Invalid vote type or postId" });
+                if (!postId || !ObjectId.isValid(postId)) {
+                    return res.status(400).json({ message: "Invalid postId." });
+                }
+
+                if (!["like", "dislike", null].includes(voteType)) {
+                    return res.status(400).json({ message: "Invalid vote type. Must be 'like', 'dislike', or null." });
                 }
 
                 const post = await communityCollection.findOne({ _id: new ObjectId(postId) });
@@ -401,24 +522,19 @@ async function run() {
 
                 let votes = post.votes || [];
                 const existingVote = votes.find((v) => v.email === email);
-                let updatedVotes;
 
                 if (existingVote) {
-                    // Remove current vote
                     votes = votes.filter((v) => v.email !== email);
                 }
 
-                // Add new vote if not null
                 if (voteType) {
                     votes.push({ email, type: voteType });
                 }
 
-                // Recalculate counts
                 const likes = votes.filter((v) => v.type === "like").length;
                 const dislikes = votes.filter((v) => v.type === "dislike").length;
 
-                // Save to DB
-                await communityCollection.updateOne(
+                const result = await communityCollection.updateOne(
                     { _id: new ObjectId(postId) },
                     {
                         $set: {
@@ -429,17 +545,21 @@ async function run() {
                     }
                 );
 
-                res.json({ message: "Vote updated" });
+                if (result.modifiedCount === 0) {
+                    return res.status(500).json({ message: "Failed to update vote." });
+                }
+
+                res.json({ message: "Vote updated", likes, dislikes });
             } catch (err) {
                 console.error("Vote error:", err);
                 res.status(500).json({ message: "Internal server error" });
             }
         });
 
-        // ================= Users routes =================
-        app.get("/users", async (req, res) => {
+        // ================= User Routes =================
+        app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
             try {
-                const users = await req.usersCollection.find().toArray();
+                const users = await usersCollection.find().toArray();
                 res.send(users);
             } catch (error) {
                 console.error("Failed to fetch users:", error);
@@ -449,7 +569,7 @@ async function run() {
 
         app.get("/users/:email", async (req, res) => {
             try {
-                const user = await req.usersCollection.findOne({ email: req.params.email });
+                const user = await usersCollection.findOne({ email: req.params.email });
                 if (!user) return res.status(404).send({ message: "User not found" });
                 res.send(user);
             } catch (error) {
@@ -460,7 +580,7 @@ async function run() {
 
         app.get("/users/role/:email", async (req, res) => {
             try {
-                const user = await req.usersCollection.findOne({ email: req.params.email });
+                const user = await usersCollection.findOne({ email: req.params.email });
                 if (!user) return res.status(404).send({ message: "User not found" });
                 res.send({ role: user.role || "member" });
             } catch (error) {
@@ -472,7 +592,11 @@ async function run() {
         app.post("/users", async (req, res) => {
             try {
                 const { email, displayName, photoURL, lastSignInTime, role = "member" } = req.body;
-                const result = await req.usersCollection.updateOne(
+                if (!email) {
+                    return res.status(400).send({ message: "Email is required to create/update user." });
+                }
+
+                const result = await usersCollection.updateOne(
                     { email },
                     {
                         $set: {
@@ -480,6 +604,10 @@ async function run() {
                             photoURL,
                             lastSignInTime,
                             role,
+                            updatedAt: new Date(),
+                        },
+                        $setOnInsert: {
+                            createdAt: new Date(),
                         }
                     },
                     { upsert: true }
@@ -491,26 +619,40 @@ async function run() {
             }
         });
 
-        app.patch("/users", async (req, res) => {
+        app.patch("/users", verifyFBToken, async (req, res) => {
             try {
                 const { email, lastSignInTime, role } = req.body;
+                const authenticatedEmail = req.decoded.email;
 
                 if (!email) {
-                    return res.status(400).send({ message: "Email is required" });
+                    return res.status(400).send({ message: "Email is required for update." });
                 }
 
-                const updateFields = {};
+                if (authenticatedEmail !== email && req.decoded.role !== "admin") {
+                    return res.status(403).send({ message: "Forbidden: You can only update your own profile or must be an admin." });
+                }
+
+                const updateFields = { updatedAt: new Date() };
                 if (lastSignInTime) updateFields.lastSignInTime = lastSignInTime;
-                if (role) updateFields.role = role;
 
-                if (Object.keys(updateFields).length === 0) {
-                    return res.status(400).send({ message: "No valid fields to update" });
+                if (role && req.decoded.role === "admin") {
+                    updateFields.role = role;
+                } else if (role && req.decoded.role !== "admin") {
+                    return res.status(403).send({ message: "Forbidden: Only admins can change user roles." });
                 }
 
-                const result = await req.usersCollection.updateOne(
+                if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
+                    return res.status(400).send({ message: "No valid fields to update (lastSignInTime or role)." });
+                }
+
+                const result = await usersCollection.updateOne(
                     { email },
                     { $set: updateFields }
                 );
+
+                if (result.modifiedCount === 0 && result.matchedCount === 0) {
+                    return res.status(404).send({ message: "User not found or no changes made." });
+                }
 
                 res.send(result);
             } catch (error) {
@@ -519,13 +661,13 @@ async function run() {
             }
         });
 
-        // ================= JWT Auth routes =================
+        // ================= JWT Authentication Routes =================
         app.post("/register", async (req, res) => {
             try {
                 const { email, displayName, photoURL, lastSignInTime } = req.body;
                 if (!email) return res.status(400).json({ error: "Email required" });
 
-                await req.usersCollection.updateOne(
+                await usersCollection.updateOne(
                     { email },
                     {
                         $set: {
@@ -534,12 +676,16 @@ async function run() {
                             photoURL,
                             lastSignInTime: lastSignInTime || new Date().toISOString(),
                             role: "member",
+                            updatedAt: new Date(),
                         },
+                        $setOnInsert: {
+                            createdAt: new Date(),
+                        }
                     },
                     { upsert: true }
                 );
 
-                const user = await req.usersCollection.findOne({ email });
+                const user = await usersCollection.findOne({ email });
 
                 const token = jwt.sign(
                     {
@@ -571,8 +717,13 @@ async function run() {
                 const { email } = req.body;
                 if (!email) return res.status(400).json({ error: "Email required" });
 
-                const user = await req.usersCollection.findOne({ email });
+                const user = await usersCollection.findOne({ email });
                 if (!user) return res.status(401).json({ error: "User not found" });
+
+                await usersCollection.updateOne(
+                    { email },
+                    { $set: { lastSignInTime: new Date().toISOString(), updatedAt: new Date() } }
+                );
 
                 const token = jwt.sign(
                     {
@@ -600,14 +751,13 @@ async function run() {
         });
 
         app.post("/logout", (req, res) => {
-            res.json({ message: "Logged out" });
+            res.json({ message: "Logged out successfully" });
         });
 
-        // ================= Bookings =================
-        // Get all bookings with user data (admin only)
-        app.get("/bookings", verifyAdmin, async (req, res) => {
+        // ================= Booking Routes =================
+        app.get("/bookings", verifyFBToken, verifyAdmin, async (req, res) => {
             try {
-                const bookings = await req.bookingsCollection.aggregate([
+                const bookings = await bookingsCollection.aggregate([
                     {
                         $lookup: {
                             from: "users",
@@ -628,6 +778,7 @@ async function run() {
                     { $unwind: "$trainerDetails" },
                     {
                         $project: {
+                            _id: 1,
                             email: 1,
                             trainerId: 1,
                             slotId: 1,
@@ -654,7 +805,7 @@ async function run() {
                             trainerSpecialization: "$trainerDetails.specialization",
                         },
                     },
-                ]).toArray(); // .toArray() is necessary for native driver aggregate
+                ]).toArray();
                 res.send(bookings);
             } catch (error) {
                 console.error("Failed to fetch bookings:", error);
@@ -662,7 +813,6 @@ async function run() {
             }
         });
 
-        // Get bookings by user email (self or admin)
         app.get("/bookings/user/:email", verifyFBToken, async (req, res) => {
             const email = req.params.email;
 
@@ -671,7 +821,7 @@ async function run() {
             }
 
             try {
-                const bookings = await req.bookingsCollection.aggregate([
+                const bookings = await bookingsCollection.aggregate([
                     { $match: { email } },
                     {
                         $lookup: {
@@ -693,6 +843,7 @@ async function run() {
                     { $unwind: "$trainerDetails" },
                     {
                         $project: {
+                            _id: 1,
                             email: 1,
                             trainerId: 1,
                             slotId: 1,
@@ -728,25 +879,27 @@ async function run() {
             }
         });
 
-        // Create a booking
         app.post('/bookings', verifyFBToken, async (req, res) => {
             try {
                 const { email, trainerId, slotId, slotName, slotTime, slotDay, packageId, packageName, packagePrice, sessionType, price, transactionId, paymentStatus } = req.body;
 
-                // Input validation (basic)
                 if (!email || !trainerId || !slotId || !price || !transactionId) {
-                    return res.status(400).json({ message: 'Missing required booking data.' });
+                    return res.status(400).json({ message: 'Missing required booking data (email, trainerId, slotId, price, transactionId).' });
+                }
+                if (!ObjectId.isValid(trainerId)) {
+                    return res.status(400).json({ message: 'Invalid trainer ID format.' });
+                }
+                if (typeof price !== 'number' || price <= 0) {
+                    return res.status(400).json({ message: 'Price must be a positive number.' });
                 }
 
-                // Check if user is trying to book for themselves
                 if (req.decoded.email !== email) {
                     return res.status(403).json({ message: 'Forbidden: You can only book for your own account.' });
                 }
 
-                // Prepare booking document
                 const bookingDocument = {
                     email,
-                    trainerId: new ObjectId(trainerId), // Ensure trainerId is an ObjectId
+                    trainerId: new ObjectId(trainerId),
                     slotId,
                     slotName,
                     slotTime: slotTime || null,
@@ -762,50 +915,46 @@ async function run() {
                     updatedAt: new Date(),
                 };
 
-                // Insert the new booking
-                const bookingResult = await req.bookingsCollection.insertOne(bookingDocument);
-                const newBooking = { _id: bookingResult.insertedId, ...bookingDocument }; // Construct the inserted doc
+                const bookingResult = await bookingsCollection.insertOne(bookingDocument);
+                const newBooking = { _id: bookingResult.insertedId, ...bookingDocument };
 
-                // Find the trainer and update the slot status
-                const trainer = await req.trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
 
                 if (!trainer) {
-                    // Rollback the booking if trainer is not found
-                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
                     return res.status(404).json({ message: 'Trainer not found.' });
                 }
 
-                // Find the index of the slot to update
+                if (trainer.status !== 'accepted') {
+                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    return res.status(403).json({ message: 'Cannot book this trainer. Trainer is not yet active.' });
+                }
+
                 const slotIndex = trainer.slots.findIndex(slot => slot.id === slotId);
 
                 if (slotIndex === -1) {
-                    // Rollback the booking if slot is not found
-                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
                     return res.status(404).json({ message: 'Slot not found for this trainer.' });
                 }
 
                 if (trainer.slots[slotIndex].isBooked) {
-                    // This is a race condition. If already booked, prevent double booking
-                    // Rollback the newBooking
-                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
                     return res.status(409).json({ message: 'Slot is already booked.' });
                 }
 
-                // Update the specific slot's isBooked status
-                const updateTrainerResult = await req.trainerCollection.updateOne(
+                const updateTrainerResult = await trainerCollection.updateOne(
                     { "_id": new ObjectId(trainerId), "slots.id": slotId },
                     {
                         "$set": {
-                            "slots.$.isBooked": true, // Using positional operator to update the matched element
+                            "slots.$.isBooked": true,
                             "updatedAt": new Date()
                         }
                     }
                 );
 
                 if (updateTrainerResult.modifiedCount === 0) {
-                    // If for some reason the slot wasn't updated (e.g., another process changed it)
-                    await req.bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
-                    return res.status(500).json({ message: 'Failed to update trainer slot status.' });
+                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
+                    return res.status(500).json({ message: 'Failed to update trainer slot status. Booking rolled back.' });
                 }
 
                 res.status(201).json({ message: 'Booking successful and slot updated!', booking: newBooking });
@@ -816,24 +965,38 @@ async function run() {
             }
         });
 
-        // Update booking payment status and transactionId
         app.patch("/bookings/:id", verifyFBToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 const { transactionId, paymentStatus } = req.body;
 
-                const booking = await req.bookingsCollection.findOne({ _id: new ObjectId(id) });
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ message: "Invalid booking ID format." });
+                }
+
+                const booking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
                 if (!booking) return res.status(404).send({ message: "Booking not found" });
 
-                // Allow user to update their own booking's payment status, or admin can
                 if (booking.email !== req.decoded.email && req.decoded.role !== "admin") {
                     return res.status(403).send({ message: "Forbidden: Cannot update others' bookings" });
                 }
 
-                const result = await req.bookingsCollection.updateOne(
+                const updateFields = { updatedAt: new Date() };
+                if (transactionId) updateFields.transactionId = transactionId;
+                if (paymentStatus) updateFields.paymentStatus = paymentStatus;
+
+                if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
+                    return res.status(400).send({ message: "No valid fields to update (transactionId or paymentStatus)." });
+                }
+
+                const result = await bookingsCollection.updateOne(
                     { _id: new ObjectId(id) },
-                    { $set: { transactionId, paymentStatus, updatedAt: new Date() } }
+                    { $set: updateFields }
                 );
+
+                if (result.modifiedCount === 0 && result.matchedCount === 0) {
+                    return res.status(404).send({ message: "Booking found but no changes made." });
+                }
 
                 res.send(result);
             } catch (error) {
@@ -842,17 +1005,17 @@ async function run() {
             }
         });
 
-        // ================= Payments =================
+        // ================= Payment Routes =================
         app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
             const { amount } = req.body;
 
-            if (!amount || amount <= 0) {
-                return res.status(400).send({ message: "Invalid payment amount" });
+            if (!amount || typeof amount !== 'number' || amount <= 0) {
+                return res.status(400).send({ message: "Invalid payment amount. Must be a positive number." });
             }
 
             try {
                 const paymentIntent = await stripe.paymentIntents.create({
-                    amount: Math.round(amount * 100), // Stripe expects amount in cents
+                    amount: Math.round(amount * 100),
                     currency: "usd",
                     payment_method_types: ["card"],
                 });
@@ -864,17 +1027,21 @@ async function run() {
             }
         });
 
-        // Store payment info after success
         app.post("/payments", verifyFBToken, async (req, res) => {
             try {
+                const paymentData = req.body;
+                if (!paymentData.transactionId || !paymentData.amount) {
+                    return res.status(400).send({ message: "Missing required payment data (transactionId, amount)." });
+                }
+
                 const payment = {
-                    ...req.body,
+                    ...paymentData,
                     email: req.decoded.email,
                     createdAt: new Date(),
                     updatedAt: new Date(),
                 };
 
-                const result = await req.paymentsCollection.insertOne(payment);
+                const result = await paymentsCollection.insertOne(payment);
                 res.status(201).send(result);
             } catch (error) {
                 console.error("Failed to store payment:", error);
@@ -882,126 +1049,11 @@ async function run() {
             }
         });
 
-        // Application related routes (Trainer Application)
-        app.post("/applications/trainer", verifyFBToken, async (req, res) => {
-            try {
-                const {
-                    email,
-                    name,
-                    age,
-                    experience,
-                    photoURL,
-                    specialization,
-                    description,
-                    certifications,
-                    availableSlots,
-                    availableDays,
-                    sessions,
-                    social,
-                    rating,
-                    comments,
-                    slots,
-                    ratings
-                } = req.body;
-
-                // Prevent duplicate application
-                const existingApplication = await req.applicationsCollection.findOne({ email });
-                if (existingApplication) {
-                    return res.status(409).send({ message: "You have already submitted a trainer application." });
-                }
-
-                // Only allow self-application
-                if (req.decoded.email !== email) {
-                    return res.status(403).send({ message: "Forbidden: Cannot apply for others." });
-                }
-
-                const newApplication = {
-                    email,
-                    name,
-                    age,
-                    experience,
-                    photoURL,
-                    specialization,
-                    description,
-                    certifications: certifications || [],
-                    availableSlots: availableSlots || [],
-                    availableDays: availableDays || [],
-                    sessions: sessions || 0,
-                    social: social || { instagram: '', twitter: '', linkedin: '' },
-                    rating: rating || 0,
-                    comments: comments || [],
-                    slots: slots || [],
-                    ratings: ratings || [],
-                    role: "trainer",
-                    status: "pending",
-                    appliedAt: new Date(),
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
-                };
-
-                const result = await req.applicationsCollection.insertOne(newApplication);
-                res.status(201).send(result);
-            } catch (error) {
-                console.error("Error submitting trainer application:", error);
-                res.status(500).send({ message: "Failed to submit application." });
-            }
-        });
-
-        app.delete("/applications/trainer/:id", async (req, res) => {
-            try {
-                const id = req.params.id;
-                const feedback = req.body?.feedback;
-
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({ message: "Invalid application ID." });
-                }
-
-                const query = { _id: new ObjectId(id) };
-                const applicationToDelete = await req.applicationsCollection.findOne(query);
-
-                if (!applicationToDelete) {
-                    return res.status(404).send({ message: "Application not found." });
-                }
-
-                const result = await req.applicationsCollection.deleteOne(query);
-
-                if (result.deletedCount === 1) {
-                    if (feedback) {
-                        console.log(`Application ${id} rejected with feedback: ${feedback}`);
-                    }
-                    res.send({ message: "Application deleted successfully." });
-                } else {
-                    res.status(500).send({ message: "Failed to delete application." });
-                }
-            } catch (error) {
-                console.error("Error deleting trainer application:", error);
-                res.status(500).send({ message: "Failed to delete application." });
-            }
-        });
-
-        // Get all trainer applications (Admin only)
-        app.get("/applications/trainer",  async (req, res) => {
-            try {
-                const applications = await req.applicationsCollection.find({}).toArray();
-                res.send(applications);
-            } catch (error) {
-                console.error("Error fetching trainer applications:", error);
-                res.status(500).send({ message: "Failed to fetch applications." });
-            }
-        });
-
-        // Send a ping to confirm a successful connection
-        // await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
-        // Ensures that the client will close when you finish/error
-        // await client.close(); // Only close if you want to explicitly disconnect
     }
 }
 
-// Call the run function to connect to DB and start the server
 run().catch(console.dir);
-
 
 app.get("/", (req, res) => {
     res.send("FitFlow Backend Server Running");
