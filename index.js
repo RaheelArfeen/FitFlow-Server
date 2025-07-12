@@ -325,8 +325,40 @@ async function run() {
         // ================= Community Routes =================
         app.get('/community', async (req, res) => {
             try {
-                const posts = await communityCollection.find().sort({ createdAt: -1 }).toArray();
+                const page = parseInt(req.query.page);
+                const limit = parseInt(req.query.limit);
+
+                // If both page and limit are provided, use pagination
+                if (!isNaN(page) && !isNaN(limit)) {
+                    const skip = (page - 1) * limit;
+
+                    const totalPostsCount = await communityCollection.countDocuments();
+
+                    const posts = await communityCollection
+                        .find()
+                        .sort({ createdAt: -1 })
+                        .skip(skip)
+                        .limit(limit)
+                        .toArray();
+
+                    const totalPages = Math.ceil(totalPostsCount / limit);
+
+                    return res.send({
+                        posts,
+                        totalCount: totalPostsCount,
+                        totalPages,
+                        currentPage: page,
+                    });
+                }
+
+                // If no page or limit, return all posts
+                const posts = await communityCollection
+                    .find()
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
                 res.send(posts);
+
             } catch (error) {
                 console.error('Error fetching community posts:', error);
                 res.status(500).send({ message: 'Failed to fetch posts.' });
@@ -557,7 +589,7 @@ async function run() {
         });
 
         // ================= User Routes =================
-        app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
+        app.get("/users", verifyFBToken, async (req, res) => {
             try {
                 const users = await usersCollection.find().toArray();
                 res.send(users);
@@ -619,26 +651,28 @@ async function run() {
             }
         });
 
-        app.patch("/users", verifyFBToken, async (req, res) => {
+        // Admin-only route to update user roles or other user data
+        app.patch("/users", verifyFBToken, verifyAdmin, async (req, res) => { // Added verifyAdmin middleware
             try {
                 const { email, lastSignInTime, role } = req.body;
-                const authenticatedEmail = req.decoded.email;
+                // const authenticatedEmail = req.decoded.email; // No longer needed for this check as verifyAdmin ensures admin role
 
                 if (!email) {
                     return res.status(400).send({ message: "Email is required for update." });
                 }
 
-                if (authenticatedEmail !== email && req.decoded.role !== "admin") {
-                    return res.status(403).send({ message: "Forbidden: You can only update your own profile or must be an admin." });
-                }
+                // The verifyAdmin middleware already ensures the requester is an admin.
+                // Thus, an admin is performing this action, and they are allowed to change roles.
+                // The previous conditional check `if (authenticatedEmail !== email && req.decoded.role !== "admin")`
+                // is no longer necessary here because verifyAdmin guarantees `req.decoded.role === "admin"`.
 
                 const updateFields = { updatedAt: new Date() };
                 if (lastSignInTime) updateFields.lastSignInTime = lastSignInTime;
 
-                if (role && req.decoded.role === "admin") {
+                // Since verifyAdmin is already applied, we know the requester has admin privileges.
+                // Therefore, if a 'role' is provided in the request body, it can be applied.
+                if (role) {
                     updateFields.role = role;
-                } else if (role && req.decoded.role !== "admin") {
-                    return res.status(403).send({ message: "Forbidden: Only admins can change user roles." });
                 }
 
                 if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
