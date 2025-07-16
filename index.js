@@ -28,7 +28,7 @@ const client = new MongoClient(uri, {
 
 app.use(
     cors({
-        origin: ["http://localhost:5173", "https://your-frontend-domain.com"],
+        origin: ["http://localhost:5173", "https://fitflow-raheel.netlify.app"],
         credentials: true,
     })
 );
