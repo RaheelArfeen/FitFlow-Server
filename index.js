@@ -948,7 +948,7 @@ async function run() {
         });
 
         // ================ Newsletter Routes ================
-        app.get('/newsletter', async (req, res) => {
+        app.get('/newsletter', verifyAdmin, async (req, res) => {
             try {
                 const subscribers = await newsLetterCollection.find().sort({ createdAt: -1 }).toArray();
 
