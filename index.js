@@ -86,22 +86,78 @@ async function run() {
         const bookingsCollection = db.collection("bookings");
         const paymentsCollection = db.collection("payments");
         const communityCollection = db.collection("community");
+        const classesCollection = db.collection("classes");
+        const newsLetterCollection = db.collection("newsletters");
+        const reviewsCollection = db.collection("reviews");
 
         // ================= Trainer Routes =================
         app.get("/trainers", async (req, res) => {
             try {
-                const { status } = req.query;
+                const { status, email } = req.query;
                 let query = {};
 
                 if (status) {
                     query.status = status;
                 }
+                if (email) {
+                    query.email = email;
+                }
 
                 const trainers = await trainerCollection.find(query).toArray();
-                res.send(trainers);
+
+                const trainersWithTotalBookings = trainers.map(trainer => {
+                    const totalBookings = (trainer.slots || []).reduce((acc, slot) => acc + (slot.bookingCount || 0), 0);
+                    return { ...trainer, totalBookings };
+                });
+
+                res.send(trainersWithTotalBookings);
             } catch (error) {
                 console.error("Failed to fetch trainers:", error);
                 res.status(500).send({ message: "Failed to fetch trainers" });
+            }
+        });
+
+        app.get("/trainers/slots/byEmail/:email", async (req, res) => {
+            try {
+                const { email } = req.params;
+
+                // Find the trainer document by email and project only the 'slots' array
+                // This ensures only the slots data is returned, making the response lighter.
+                const trainer = await trainerCollection.findOne(
+                    { email: email },
+                    { projection: { slots: 1, _id: 0 } }
+                );
+
+                if (!trainer) {
+                    // If no trainer is found with the given email, return 404
+                    return res.status(404).send({ message: "Trainer not found for the given email." });
+                }
+
+                // If trainer found but has no 'slots' array or it's empty, return an empty array
+                // This provides a consistent response even if a trainer has no slots yet.
+                if (!trainer.slots) {
+                    return res.status(200).send([]);
+                }
+
+                // Send the array of slots
+                res.status(200).send(trainer.slots);
+
+            } catch (error) {
+                // Log the error for debugging purposes
+                console.error("Error fetching trainer slots by email:", error.message, error.stack);
+                // Send a generic 500 status for internal server errors
+                res.status(500).send({ message: "Failed to fetch trainer slots by email." });
+            }
+        });
+
+        app.get("/trainers/:id", async (req, res) => {
+            try {
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(req.params.id) });
+                if (!trainer) return res.status(404).send({ message: "Trainer not found" });
+                res.send(trainer);
+            } catch (error) {
+                console.error("Failed to fetch trainer by ID:", error);
+                res.status(500).send({ message: "Failed to fetch trainer" });
             }
         });
 
@@ -117,16 +173,20 @@ async function run() {
                     description,
                     certifications,
                     sessions,
-                    social,
-                    slots
+                    slots // Make sure this is destructured, even if it's undefined
                 } = req.body;
 
+                // Still require the core profile fields
                 if (!email || !name || !specialization || !description || !photoURL) {
                     return res.status(400).send({ message: "Missing required application fields (email, name, specialization, description, photoURL)." });
                 }
-                if (!Array.isArray(slots)) {
-                    return res.status(400).send({ message: "Slots must be an array for trainer application." });
+
+                // Changed validation for slots:
+                // If 'slots' is provided, ensure it's an array. If not provided, it's fine (will be [] by default below).
+                if (slots !== undefined && !Array.isArray(slots)) {
+                    return res.status(400).send({ message: "If provided, 'slots' must be an array for trainer application." });
                 }
+
                 if (req.decoded.email !== email) {
                     return res.status(403).send({ message: "Forbidden: You can only submit a trainer application for your own account." });
                 }
@@ -146,7 +206,6 @@ async function run() {
                     description,
                     certifications: certifications || [],
                     sessions: sessions || 0,
-                    social: social || { instagram: '', twitter: '', linkedin: '' },
                     rating: 0,
                     ratings: [],
                     slots: slots || [],
@@ -165,6 +224,152 @@ async function run() {
             }
         });
 
+        // Trainer slots Route
+        app.get("/trainers/slots/:trainerId", async (req, res) => {
+            try {
+                const { trainerId } = req.params;
+
+                // Validate trainerId format
+                if (!trainerId || !ObjectId.isValid(trainerId)) {
+                    return res.status(400).send({ message: "Invalid trainer ID format." });
+                }
+
+                // Find the trainer document and project only the 'slots' array
+                // The projection `{ slots: 1, _id: 0 }` means:
+                // - `slots: 1`: Include the 'slots' field.
+                // - `_id: 0`: Exclude the '_id' field (by default, _id is included).
+                const trainer = await trainerCollection.findOne(
+                    { _id: new ObjectId(trainerId) },
+                    { projection: { slots: 1, _id: 0 } }
+                );
+
+                // If no trainer is found with the given ID
+                if (!trainer) {
+                    return res.status(404).send({ message: "Trainer not found." });
+                }
+
+                // If trainer found but has no 'slots' array or it's empty, return an empty array
+                // This ensures a consistent response even if a trainer has no slots yet.
+                if (!trainer.slots) {
+                    return res.status(200).send([]);
+                }
+
+                // Send the array of slots
+                res.status(200).send(trainer.slots);
+
+            } catch (error) {
+                // Log the error for debugging purposes
+                console.error("Error fetching trainer slots:", error.message, error.stack);
+                // Send a generic 500 status for internal server errors
+                res.status(500).send({ message: "Failed to fetch trainer slots." });
+            }
+        });
+
+        app.post("/trainers/slots", verifyFBToken, async (req, res) => {
+            try {
+                const {
+                    slotName,
+                    slotTime,
+                    days,          // Expected to be an array, e.g., ["Monday"]
+                    duration,
+                    classType,
+                    maxParticipants,
+                    description,
+                    trainerId,     // The _id of the trainer document from frontend
+                    email          // Trainer's email from frontend (for verification against token)
+                } = req.body;
+
+                // Basic validation for required fields
+                if (!slotName || !slotTime || !days || !Array.isArray(days) || days.length === 0 || !duration || !classType || !trainerId || !email) {
+                    return res.status(400).send({ message: "Missing required slot details or invalid 'days' format. Required: slotName, slotTime, days (array), duration, classType, trainerId, email." });
+                }
+
+                if (req.decoded.email !== email) {
+                    return res.status(403).send({ message: "Forbidden: You can only add slots for your own trainer profile." });
+                }
+
+                const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+
+                if (!trainer) {
+                    return res.status(404).send({ message: "Trainer not found." });
+                }
+
+                if (trainer.email !== email) {
+                    return res.status(403).send({ message: "Unauthorized: Trainer email mismatch for provided ID." });
+                }
+
+                const newSlot = {
+                    id: Date.now().toString(),
+                    slotName,
+                    slotTime,
+                    days,
+                    duration,
+                    classType,
+                    maxParticipants: parseInt(maxParticipants) || 10,
+                    description: description || "",
+                    bookingCount: 0,
+                    bookedMembers: [],
+                    createdAt: new Date(),
+                };
+
+                const result = await trainerCollection.updateOne(
+                    { _id: new ObjectId(trainerId) },
+                    {
+                        $push: { slots: newSlot },
+                        $set: { updatedAt: new Date() }
+                    }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ message: "Trainer not found or update failed." });
+                }
+                if (result.modifiedCount === 0) {
+                    return res.status(500).send({ message: "Failed to add slot (no modification occurred on trainer document)." });
+                }
+
+                res.status(201).send({ message: "Slot added successfully!", slot: newSlot });
+
+            } catch (error) {
+                console.error("Error adding slot to trainer profile:", error.message, error.stack);
+                res.status(500).send({ message: "Failed to add slot to trainer profile." });
+            }
+        });
+
+        app.delete("/trainers/slots/:slotId", verifyFBToken, async (req, res) => {
+            try {
+                const { slotId } = req.params;
+                const trainerEmail = req.decoded.email;
+                const trainer = await trainerCollection.findOne({
+                    email: trainerEmail,
+                    "slots.id": slotId
+                });
+
+                if (!trainer) {
+                    return res.status(404).send({ message: "Slot not found or you are not authorized to delete this slot." });
+                }
+
+                const result = await trainerCollection.updateOne(
+                    { _id: trainer._id },
+                    { $pull: { slots: { id: slotId } } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ message: "Trainer not found or slot already deleted." });
+                }
+
+                if (result.modifiedCount === 0) {
+                    return res.status(500).send({ message: "Failed to delete slot (no modification occurred)." });
+                }
+
+                res.status(200).send({ message: "Slot deleted successfully!" });
+
+            } catch (error) {
+                console.error("Error deleting slot:", error.message, error.stack);
+                res.status(500).send({ message: "Failed to delete slot." });
+            }
+        });
+
+        // Trainer status Route
         app.patch("/trainers/:id/status", verifyFBToken, verifyAdmin, async (req, res) => {
             try {
                 const trainerId = req.params.id;
@@ -219,17 +424,6 @@ async function run() {
             } catch (error) {
                 console.error("Error updating trainer status:", error);
                 res.status(500).send({ message: "Failed to update trainer status." });
-            }
-        });
-
-        app.get("/trainers/:id", async (req, res) => {
-            try {
-                const trainer = await trainerCollection.findOne({ _id: new ObjectId(req.params.id) });
-                if (!trainer) return res.status(404).send({ message: "Trainer not found" });
-                res.send(trainer);
-            } catch (error) {
-                console.error("Failed to fetch trainer by ID:", error);
-                res.status(500).send({ message: "Failed to fetch trainer" });
             }
         });
 
@@ -322,6 +516,212 @@ async function run() {
             }
         });
 
+        // ================= Review Routes =================
+        app.post('/reviews', verifyFBToken, async (req, res) => { // Added verifyFBToken
+            try {
+                const { trainerId, reviewerEmail, reviewerName, trainerEmail, trainerName, rating, createdAt, } = req.body;
+
+                const comment = req.body.comment; // Get comment separately to check its existence/value
+
+                // Authorization: Ensure the user submitting the review is the authenticated user
+                if (req.decoded.email !== reviewerEmail) {
+                    return res.status(403).send({ message: "Forbidden: You can only submit reviews for your own account." });
+                }
+
+                // Basic validation for required fields (comment is now fully optional)
+                if (!trainerId || !reviewerEmail || !reviewerName ||
+                    !trainerEmail || !trainerName || typeof rating === 'undefined') {
+                    return res.status(400).send({ message: "Missing required review data (trainerId, reviewerEmail, reviewerName, trainerEmail, trainerName, rating)." });
+                }
+                if (!ObjectId.isValid(trainerId)) {
+                    return res.status(400).send({ message: "Invalid Trainer ID format." });
+                }
+                if (typeof rating !== 'number' || rating < 1 || rating > 5) {
+                    return res.status(400).send({ message: "Rating must be a number between 1 and 5." });
+                }
+
+                const existingDetailedReview = await reviewsCollection.findOne({
+                    reviewerEmail: reviewerEmail // One detailed review per booking per user
+                });
+
+                if (existingDetailedReview) {
+                    return res.status(409).send({ message: "A detailed review for this booking by your account already exists." });
+                }
+                // --- End Crucial Check ---
+
+
+                // Construct the review document
+                const reviewDocument = {
+                    trainerId: new ObjectId(trainerId), // Convert to ObjectId
+                    reviewerEmail: reviewerEmail,
+                    reviewerName: reviewerName,
+                    trainerEmail: trainerEmail,
+                    trainerName: trainerName,
+                    rating: rating,
+                    createdAt: new Date(createdAt || Date.now()), // Use provided createdAt or current time
+                    updatedAt: new Date(), // Add an updatedAt field for potential future edits
+                };
+
+                // --- Conditionally add 'comment' only if it's provided and not an empty string ---
+                if (comment && comment.trim() !== '') {
+                    reviewDocument.comment = comment.trim();
+                }
+
+                const result = await reviewsCollection.insertOne(reviewDocument);
+                const newReview = { _id: result.insertedId, ...reviewDocument }; // For sending back the created review
+
+                // --- Important: Mark the booking as reviewed ---
+                const updateBookingResult = await bookingsCollection.updateOne(
+                    { $set: { hasReviewed: true, reviewSubmittedAt: new Date() } }
+                );
+
+
+                res.status(201).send({ message: "Detailed review submitted successfully!", review: newReview });
+
+            } catch (error) {
+                console.error("Error submitting detailed review:", error);
+                if (error.code === 11000) { // MongoDB duplicate key error code
+                    return res.status(409).send({ message: "A detailed review for this booking by your account already exists (database conflict)." });
+                }
+                res.status(500).send({ message: "Failed to submit detailed review.", error: error.message });
+            }
+        });
+
+        app.get("/reviews", async (req, res) => {
+            try {
+                const trainerId = req.query.trainerId; // Query parameter for filtering by trainer
+
+                let query = {};
+                if (trainerId) {
+                    // Validate trainerId format if provided
+                    if (!ObjectId.isValid(trainerId)) {
+                        return res.status(400).send({ message: "Invalid Trainer ID format for query." });
+                    }
+                    query.trainerId = new ObjectId(trainerId); // Convert to ObjectId for database query
+                }
+
+                // Fetch reviews from the collection
+                // You might want to add pagination (e.g., .skip().limit()) or more advanced sorting options.
+                // Sorting by 'createdAt' in descending order (latest reviews first) is common.
+                const reviews = await reviewsCollection.find(query).sort({ createdAt: -1 }).toArray();
+
+                res.status(200).send(reviews);
+
+            } catch (error) {
+                console.error("Error fetching reviews:", error);
+                res.status(500).send({ message: "Failed to fetch reviews.", error: error.message });
+            }
+        });
+
+        // ================= Class Routes =================
+        app.get("/classes", async (req, res) => {
+            try {
+                const classes = await classesCollection.find().toArray();
+                res.send(classes);
+            } catch (error) {
+                console.error("Failed to fetch classes:", error);
+                res.status(500).send({ message: "Failed to fetch classes" });
+            }
+        });
+
+        app.get("/classes/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ message: "Invalid class ID." });
+                }
+
+                const classItem = await classesCollection.findOne({ _id: new ObjectId(id) });
+
+                if (!classItem) {
+                    return res.status(404).send({ message: "Class not found." });
+                }
+
+                // Optional: convert _id to string if needed by frontend
+                classItem._id = classItem._id.toString();
+
+                res.send(classItem);
+            } catch (error) {
+                console.error("Failed to fetch class by ID:", error);
+                res.status(500).send({ message: "Failed to fetch class." });
+            }
+        });
+
+
+        app.post("/classes", verifyFBToken, verifyAdmin, async (req, res) => {
+            try {
+                const {
+                    name,
+                    image,
+                    description,
+                    duration,
+                    difficulty,
+                    category,
+                    maxParticipants,
+                    equipment,
+                    prerequisites,
+                    benefits,
+                    schedule,
+                    trainers // This will now be an array of trainer objects
+                } = req.body;
+
+                // --- Input Validation ---
+                // 1. Ensure required class fields are present
+                if (!name || !category || !description || !duration || !image || !difficulty || !Array.isArray(trainers) || trainers.length === 0) {
+                    return res.status(400).send({ message: "Missing required class fields: name, category, description, duration, image, difficulty, and at least one trainer." });
+                }
+
+                // 2. Validate each trainer object in the array for ALL required trainer fields
+                const invalidTrainers = trainers.filter(trainer =>
+                    !trainer.name || !trainer.email || !trainer.id || typeof trainer.bookingsCount !== 'number'
+                );
+
+                if (invalidTrainers.length > 0) {
+                    return res.status(400).send({ message: "Each trainer must have a name (string), email (string), id (string), and bookingsCount (number)." });
+                }
+
+                // --- Calculate Total Bookings from Trainers ---
+                // Sum the bookingsCount for all trainers associated with this class
+                const totalTrainerBookings = trainers.reduce((sum, trainer) => {
+                    return sum + (trainer.bookingsCount || 0); // Ensure it defaults to 0 if undefined
+                }, 0);
+
+                // --- Prepare New Class Object ---
+                const newClass = {
+                    name,
+                    image,
+                    description,
+                    duration,
+                    difficulty,
+                    category,
+                    maxParticipants: maxParticipants || null,
+                    equipment: equipment || null,
+                    prerequisites: prerequisites || null,
+                    benefits: benefits || null,
+                    schedule: schedule || null,
+                    trainers: trainers.map(trainer => ({
+                        name: trainer.name,
+                        email: trainer.email,
+                        id: trainer.id,
+                        bookingsCount: trainer.bookingsCount
+                    })),
+                    bookings: totalTrainerBookings,
+                    createdBy: req.decoded.email,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                // --- Insert into Database ---
+                const result = await classesCollection.insertOne(newClass);
+                res.status(201).send({ message: "Class added successfully!", insertedId: result.insertedId });
+
+            } catch (error) {
+                console.error("Error adding class:", error);
+                res.status(500).send({ message: "Failed to add class." });
+            }
+        });
+
         // ================= Community Routes =================
         app.get("/community", async (req, res) => {
             try {
@@ -332,7 +732,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to fetch posts." });
             }
         });
-        
+
         app.get('/community/pagination', async (req, res) => {
             try {
                 const page = parseInt(req.query.page);
@@ -598,8 +998,76 @@ async function run() {
             }
         });
 
+        // ================ Newsletter Routes ================
+        app.get('/newsletter', async (req, res) => {
+            try {
+                const subscribers = await newsLetterCollection.find().sort({ createdAt: -1 }).toArray();
+
+                // Attach user role if user exists
+                const subscribersWithRole = await Promise.all(
+                    subscribers.map(async (subscriber) => {
+                        const user = await usersCollection.findOne({ email: subscriber.email });
+                        return {
+                            ...subscriber,
+                            userRole: user?.role || 'Subscriber',  // default role if no user account
+                        };
+                    })
+                );
+
+                res.status(200).json(subscribersWithRole);
+            } catch (err) {
+                console.error('GET /newsletter error:', err);
+                res.status(500).json({ message: 'Failed to retrieve subscribers' });
+            }
+        });
+
+        app.post('/newsletter', async (req, res) => {
+            try {
+                const { name, email } = req.body;
+
+                if (!name || !email) {
+                    return res.status(400).json({ message: 'Name and email are required.' });
+                }
+
+                const exists = await newsLetterCollection.findOne({ email });
+                if (exists) {
+                    return res.status(409).json({ message: 'You are already subscribed.' });
+                }
+
+                const newSubscriber = {
+                    name,
+                    email,
+                    createdAt: new Date(),
+                };
+
+                await newsLetterCollection.insertOne(newSubscriber);
+
+                res.status(201).json({ message: 'Successfully subscribed!' });
+            } catch (err) {
+                console.error('POST /newsletter error:', err);
+                res.status(500).json({ message: 'Server error' });
+            }
+        });
+
+        app.delete('/newsletter/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                const result = await newsLetterCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 1) {
+                    res.status(200).json({ message: 'Subscriber deleted successfully.' });
+                } else {
+                    res.status(404).json({ message: 'Subscriber not found.' });
+                }
+            } catch (err) {
+                console.error('DELETE /newsletter/:id error:', err);
+                res.status(500).json({ message: 'Failed to delete subscriber.' });
+            }
+        });
+
         // ================= User Routes =================
-        app.get("/users", verifyFBToken, async (req, res) => {
+        app.get("/users", async (req, res) => {
             try {
                 const users = await usersCollection.find().toArray();
                 res.send(users);
@@ -633,7 +1101,17 @@ async function run() {
 
         app.post("/users", async (req, res) => {
             try {
-                const { email, displayName, photoURL, lastSignInTime, role = "member" } = req.body;
+                const {
+                    email,
+                    displayName,
+                    photoURL,
+                    lastSignInTime,
+                    role = "member",
+                    location = "",
+                    bio = "",
+                    fitnessGoals = ""
+                } = req.body;
+
                 if (!email) {
                     return res.status(400).send({ message: "Email is required to create/update user." });
                 }
@@ -646,6 +1124,9 @@ async function run() {
                             photoURL,
                             lastSignInTime,
                             role,
+                            location,
+                            bio,
+                            fitnessGoals,
                             updatedAt: new Date(),
                         },
                         $setOnInsert: {
@@ -654,6 +1135,7 @@ async function run() {
                     },
                     { upsert: true }
                 );
+
                 res.send(result);
             } catch (error) {
                 console.error("Failed to create/update user:", error);
@@ -661,23 +1143,30 @@ async function run() {
             }
         });
 
-        app.patch("/users", verifyFBToken, async (req, res) => {
+        app.patch("/users", async (req, res) => {
             try {
-                const { email, lastSignInTime, role } = req.body;
+                const {
+                    email,
+                    lastSignInTime,
+                    role,
+                    location,
+                    bio,
+                    fitnessGoals
+                } = req.body;
 
                 if (!email) {
                     return res.status(400).send({ message: "Email is required for update." });
                 }
 
                 const updateFields = { updatedAt: new Date() };
-                if (lastSignInTime) updateFields.lastSignInTime = lastSignInTime;
+                if (lastSignInTime !== undefined) updateFields.lastSignInTime = lastSignInTime;
+                if (role !== undefined) updateFields.role = role;
+                if (location !== undefined) updateFields.location = location;
+                if (bio !== undefined) updateFields.bio = bio;
+                if (fitnessGoals !== undefined) updateFields.fitnessGoals = fitnessGoals;
 
-                if (role) {
-                    updateFields.role = role;
-                }
-
-                if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
-                    return res.status(400).send({ message: "No valid fields to update (lastSignInTime or role)." });
+                if (Object.keys(updateFields).length === 1) {
+                    return res.status(400).send({ message: "No valid fields to update." });
                 }
 
                 const result = await usersCollection.updateOne(
@@ -699,7 +1188,16 @@ async function run() {
         // ================= JWT Authentication Routes =================
         app.post("/register", async (req, res) => {
             try {
-                const { email, displayName, photoURL, lastSignInTime } = req.body;
+                const {
+                    email,
+                    displayName,
+                    photoURL,
+                    lastSignInTime,
+                    location = "",
+                    bio = "",
+                    fitnessGoals = ""
+                } = req.body;
+
                 if (!email) return res.status(400).json({ error: "Email required" });
 
                 await usersCollection.updateOne(
@@ -711,6 +1209,9 @@ async function run() {
                             photoURL,
                             lastSignInTime: lastSignInTime || new Date().toISOString(),
                             role: "member",
+                            location,
+                            bio,
+                            fitnessGoals,
                             updatedAt: new Date(),
                         },
                         $setOnInsert: {
@@ -739,6 +1240,10 @@ async function run() {
                         email: user.email,
                         role: user.role,
                         displayName: user.displayName,
+                        photoURL: user.photoURL,
+                        location: user.location || "",
+                        bio: user.bio || "",
+                        fitnessGoals: user.fitnessGoals || "",
                     },
                 });
             } catch (error) {
@@ -777,6 +1282,10 @@ async function run() {
                         email: user.email,
                         role: user.role,
                         displayName: user.displayName,
+                        photoURL: user.photoURL,
+                        location: user.location || "",
+                        bio: user.bio || "",
+                        fitnessGoals: user.fitnessGoals || "",
                     },
                 });
             } catch (error) {
@@ -790,9 +1299,12 @@ async function run() {
         });
 
         // ================= Booking Routes =================
-        app.get("/bookings", verifyFBToken, verifyAdmin, async (req, res) => {
+        app.get("/bookings", async (req, res) => {
             try {
-                const bookings = await bookingsCollection.aggregate([
+                const queryEmail = req.query.email;
+                const queryRole = req.query.role;
+
+                let pipeline = [
                     {
                         $lookup: {
                             from: "users",
@@ -836,28 +1348,50 @@ async function run() {
                             userLastSignInTime: "$userDetails.lastSignInTime",
                             trainerName: "$trainerDetails.name",
                             trainerEmail: "$trainerDetails.email",
-                            trainerImage: "$trainerDetails.image",
+                            trainerPhotoURL: "$trainerDetails.photoURL",
                             trainerSpecialization: "$trainerDetails.specialization",
                         },
                     },
-                ]).toArray();
-                res.send(bookings);
+                ];
+
+                if (queryEmail) {
+                    if (queryRole === 'trainer') {
+                        // Match bookings where the trainer's email matches the query email
+                        pipeline.unshift({
+                            $match: { trainerEmail: queryEmail }
+                        });
+                    } else {
+                        // Match bookings where the user's email matches the query email
+                        pipeline.unshift({
+                            $match: { email: queryEmail }
+                        });
+                    }
+                }
+
+                const bookings = await bookingsCollection.aggregate(pipeline).toArray();
+
+                // Calculate total revenue only for the fetched bookings
+                const totalRevenue = bookings.reduce((sum, b) => sum + (b.price || 0), 0);
+
+                res.send({ bookings, totalRevenue });
             } catch (error) {
                 console.error("Failed to fetch bookings:", error);
                 res.status(500).send({ error: "Failed to fetch bookings" });
             }
         });
 
+        // Get user-specific bookings (protected)
         app.get("/bookings/user/:email", verifyFBToken, async (req, res) => {
             const email = req.params.email;
 
+            // Important: Use req.decoded.email for authorization, not req.params.email directly
             if (req.decoded.role !== "admin" && req.decoded.email !== email) {
                 return res.status(403).send({ message: "Forbidden: Cannot access other user's bookings" });
             }
 
             try {
                 const bookings = await bookingsCollection.aggregate([
-                    { $match: { email } },
+                    { $match: { email: email } }, // Match by the email from params after authorization
                     {
                         $lookup: {
                             from: "users",
@@ -901,7 +1435,7 @@ async function run() {
                             userLastSignInTime: "$userDetails.lastSignInTime",
                             trainerName: "$trainerDetails.name",
                             trainerEmail: "$trainerDetails.email",
-                            trainerImage: "$trainerDetails.image",
+                            trainerPhotoURL: "$trainerDetails.photoURL",
                             trainerSpecialization: "$trainerDetails.specialization",
                         },
                     },
@@ -914,13 +1448,22 @@ async function run() {
             }
         });
 
-        app.post('/bookings', verifyFBToken, async (req, res) => {
+        // Create a new booking AND update trainer's slot
+        app.post('/bookings', verifyFBToken, async (req, res) => { // <-- verifyFBToken ADDED HERE
             try {
-                const { email, trainerId, slotId, slotName, slotTime, slotDay, packageId, packageName, packagePrice, sessionType, price, transactionId, paymentStatus } = req.body;
+                const {
+                    email, trainerId, slotId, slotName, slotTime,
+                    slotDuration, // Changed from 'duration' to match frontend
+                    description,
+                    slotDay, packageId, packageName, packagePrice, sessionType,
+                    price, transactionId, paymentStatus, memberInfo // memberInfo from frontend
+                } = req.body;
 
-                if (!email || !trainerId || !slotId || !price || !transactionId) {
+                // Basic validation
+                if (!email || !trainerId || !slotId || typeof price === 'undefined' || !transactionId) {
                     return res.status(400).json({ message: 'Missing required booking data (email, trainerId, slotId, price, transactionId).' });
                 }
+
                 if (!ObjectId.isValid(trainerId)) {
                     return res.status(400).json({ message: 'Invalid trainer ID format.' });
                 }
@@ -928,78 +1471,132 @@ async function run() {
                     return res.status(400).json({ message: 'Price must be a positive number.' });
                 }
 
+                // Authorization: User can only book for themselves
                 if (req.decoded.email !== email) {
                     return res.status(403).json({ message: 'Forbidden: You can only book for your own account.' });
                 }
 
+                // Find trainer and the specific slot
+                const trainerAndSlot = await trainerCollection.aggregate([
+                    {
+                        $match: {
+                            _id: new ObjectId(trainerId),
+                            status: 'accepted' // Ensure trainer is active/accepted
+                        }
+                    },
+                    {
+                        $unwind: '$slots' // Deconstruct the slots array
+                    },
+                    {
+                        $match: {
+                            // Assuming 'slots.id' is the custom string ID you use for slots
+                            // If it's MongoDB's default _id for subdocuments, change to 'slots._id'
+                            'slots.id': slotId
+                        }
+                    },
+                    {
+                        $project: {
+                            trainerStatus: '$status',
+                            targetSlot: '$slots',
+                            _id: 0
+                        }
+                    }
+                ]).toArray();
+
+                if (trainerAndSlot.length === 0) {
+                    return res.status(404).json({ message: 'Trainer not found or is not active, or slot not found.' });
+                }
+
+                const { targetSlot } = trainerAndSlot[0];
+
+                // Initialize bookingCount if it doesn't exist
+                targetSlot.bookingCount = targetSlot.bookingCount || 0;
+
+                // Check if slot is already fully booked before proceeding
+                if (targetSlot.bookingCount >= targetSlot.maxParticipants) {
+                    return res.status(409).json({ message: 'This slot is fully booked. Please choose another one.' });
+                }
+
+                // Create the booking document
                 const bookingDocument = {
                     email,
                     trainerId: new ObjectId(trainerId),
                     slotId,
                     slotName,
                     slotTime: slotTime || null,
-                    slotDay: slotDay || null,
+                    duration: slotDuration || null, // Using slotDuration from frontend
+                    description: description || null, // Will be null if not sent by frontend
+                    slotDay: Array.isArray(slotDay) ? slotDay : (slotDay ? [String(slotDay)] : []), // Ensure it's an array
                     packageId: packageId || null,
                     packageName: packageName || null,
                     packagePrice: packagePrice || null,
                     sessionType: sessionType || null,
                     price,
                     transactionId,
-                    paymentStatus: paymentStatus || "paid",
+                    paymentStatus: paymentStatus || "Completed",
                     createdAt: new Date(),
                     updatedAt: new Date(),
                 };
 
+                // Insert the booking into the bookings collection
                 const bookingResult = await bookingsCollection.insertOne(bookingDocument);
                 const newBooking = { _id: bookingResult.insertedId, ...bookingDocument };
 
-                const trainer = await trainerCollection.findOne({ _id: new ObjectId(trainerId) });
+                // Prepare member information for updating the trainer's slot
+                // Ensure memberInfo is provided from the frontend, or use decoded token data
+                const memberDetailsForSlot = memberInfo || {
+                    name: req.decoded.displayName || email,
+                    email: email,
+                    package: packageName || "N/A",
+                };
 
-                if (!trainer) {
-                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
-                    return res.status(404).json({ message: 'Trainer not found.' });
+
+                // Determine if the slot will be fully booked after this booking
+                let isSlotFullyBooked = false;
+                if (targetSlot.maxParticipants === 1 || (targetSlot.bookingCount + 1 >= targetSlot.maxParticipants)) {
+                    isSlotFullyBooked = true;
                 }
 
-                if (trainer.status !== 'accepted') {
-                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
-                    return res.status(403).json({ message: 'Cannot book this trainer. Trainer is not yet active.' });
+                // Define update fields for the trainer's slot
+                const updateFieldsForSlot = {
+                    "$inc": { "slots.$.bookingCount": 1 }, // Increment booking count
+                    "$push": { "slots.$.bookedMembers": memberDetailsForSlot }, // Add new member to bookedMembers array
+                    "$set": { "updatedAt": new Date() } // Update the trainer document's updatedAt
+                };
+
+                // If the slot becomes fully booked, update its status
+                if (isSlotFullyBooked) {
+                    updateFieldsForSlot["$set"]["slots.$.isBooked"] = true;
+                    updateFieldsForSlot["$set"]["slots.$.status"] = "booked";
                 }
 
-                const slotIndex = trainer.slots.findIndex(slot => slot.id === slotId);
-
-                if (slotIndex === -1) {
-                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
-                    return res.status(404).json({ message: 'Slot not found for this trainer.' });
-                }
-
-                if (trainer.slots[slotIndex].isBooked) {
-                    await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
-                    return res.status(409).json({ message: 'Slot is already booked.' });
-                }
-
+                // Update the specific slot within the trainer's document
                 const updateTrainerResult = await trainerCollection.updateOne(
-                    { "_id": new ObjectId(trainerId), "slots.id": slotId },
-                    {
-                        "$set": {
-                            "slots.$.isBooked": true,
-                            "updatedAt": new Date()
-                        }
-                    }
+                    { "_id": new ObjectId(trainerId), "slots.id": slotId }, // <-- Ensure 'slots.id' matches your schema
+                    updateFieldsForSlot
                 );
 
+                // If trainer slot update fails, roll back the booking
                 if (updateTrainerResult.modifiedCount === 0) {
                     await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
-                    return res.status(500).json({ message: 'Failed to update trainer slot status. Booking rolled back.' });
+                    return res.status(500).json({ message: 'Failed to update trainer slot. Booking rolled back.' });
                 }
 
-                res.status(201).json({ message: 'Booking successful and slot updated!', booking: newBooking });
+                // Both booking and slot update succeeded
+                res.status(201).json({ message: 'Booking successful and slot booking count updated!', booking: newBooking });
 
             } catch (error) {
                 console.error('Booking creation or slot update error:', error);
-                res.status(500).json({ message: 'Failed to create booking or update slot.', error: error.message });
+                // More specific error messages could be handled here
+                if (error.code === 11000) { // Duplicate key error (if you had unique index on bookings)
+                    res.status(409).json({ message: 'This booking already exists or a similar entry was made.' });
+                } else {
+                    res.status(500).json({ message: 'An internal server error occurred during booking. Please try again later.' });
+                }
             }
         });
 
+        // Patch an existing booking (e.g., to update payment status later if needed)
         app.patch("/bookings/:id", verifyFBToken, async (req, res) => {
             try {
                 const id = req.params.id;
@@ -1012,6 +1609,7 @@ async function run() {
                 const booking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
                 if (!booking) return res.status(404).send({ message: "Booking not found" });
 
+                // Authorization for updating a booking
                 if (booking.email !== req.decoded.email && req.decoded.role !== "admin") {
                     return res.status(403).send({ message: "Forbidden: Cannot update others' bookings" });
                 }
@@ -1020,6 +1618,7 @@ async function run() {
                 if (transactionId) updateFields.transactionId = transactionId;
                 if (paymentStatus) updateFields.paymentStatus = paymentStatus;
 
+                // Ensure there are actual fields to update
                 if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
                     return res.status(400).send({ message: "No valid fields to update (transactionId or paymentStatus)." });
                 }
@@ -1040,7 +1639,7 @@ async function run() {
             }
         });
 
-        // ================= Payment Routes =================
+        // ================= Payment Routes (Stripe) =================
         app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
             const { amount } = req.body;
 
@@ -1049,10 +1648,14 @@ async function run() {
             }
 
             try {
+                // Stripe amount is in cents, so multiply by 100
                 const paymentIntent = await stripe.paymentIntents.create({
                     amount: Math.round(amount * 100),
                     currency: "usd",
                     payment_method_types: ["card"],
+                    // Optional: add description, receipt_email if needed
+                    description: `Membership payment for ${req.decoded.email}`,
+                    receipt_email: req.decoded.email,
                 });
 
                 res.send({ clientSecret: paymentIntent.client_secret });
@@ -1062,6 +1665,7 @@ async function run() {
             }
         });
 
+        // This endpoint could be used for logging payment details separately from booking
         app.post("/payments", verifyFBToken, async (req, res) => {
             try {
                 const paymentData = req.body;
