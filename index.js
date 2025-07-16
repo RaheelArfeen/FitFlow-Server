@@ -35,7 +35,7 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ================= Verify Firebase Token =================
+// ================= Verify Firebase Token Middleware =================
 const verifyFBToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
@@ -52,7 +52,7 @@ const verifyFBToken = async (req, res, next) => {
     }
 };
 
-// ================= Verify Admin Role =================
+// ================= Verify Admin Role Middleware =================
 const verifyAdmin = async (req, res, next) => {
     if (!req.decoded || !req.decoded.email) {
         return res.status(401).send({ message: "Unauthorized: User not authenticated via Firebase" });
@@ -121,31 +121,23 @@ async function run() {
             try {
                 const { email } = req.params;
 
-                // Find the trainer document by email and project only the 'slots' array
-                // This ensures only the slots data is returned, making the response lighter.
                 const trainer = await trainerCollection.findOne(
                     { email: email },
                     { projection: { slots: 1, _id: 0 } }
                 );
 
                 if (!trainer) {
-                    // If no trainer is found with the given email, return 404
                     return res.status(404).send({ message: "Trainer not found for the given email." });
                 }
 
-                // If trainer found but has no 'slots' array or it's empty, return an empty array
-                // This provides a consistent response even if a trainer has no slots yet.
                 if (!trainer.slots) {
                     return res.status(200).send([]);
                 }
 
-                // Send the array of slots
                 res.status(200).send(trainer.slots);
 
             } catch (error) {
-                // Log the error for debugging purposes
                 console.error("Error fetching trainer slots by email:", error.message, error.stack);
-                // Send a generic 500 status for internal server errors
                 res.status(500).send({ message: "Failed to fetch trainer slots by email." });
             }
         });
@@ -173,16 +165,13 @@ async function run() {
                     description,
                     certifications,
                     sessions,
-                    slots // Make sure this is destructured, even if it's undefined
+                    slots
                 } = req.body;
 
-                // Still require the core profile fields
                 if (!email || !name || !specialization || !description || !photoURL) {
                     return res.status(400).send({ message: "Missing required application fields (email, name, specialization, description, photoURL)." });
                 }
 
-                // Changed validation for slots:
-                // If 'slots' is provided, ensure it's an array. If not provided, it's fine (will be [] by default below).
                 if (slots !== undefined && !Array.isArray(slots)) {
                     return res.status(400).send({ message: "If provided, 'slots' must be an array for trainer application." });
                 }
@@ -224,43 +213,31 @@ async function run() {
             }
         });
 
-        // Trainer slots Route
         app.get("/trainers/slots/:trainerId", async (req, res) => {
             try {
                 const { trainerId } = req.params;
 
-                // Validate trainerId format
                 if (!trainerId || !ObjectId.isValid(trainerId)) {
                     return res.status(400).send({ message: "Invalid trainer ID format." });
                 }
 
-                // Find the trainer document and project only the 'slots' array
-                // The projection `{ slots: 1, _id: 0 }` means:
-                // - `slots: 1`: Include the 'slots' field.
-                // - `_id: 0`: Exclude the '_id' field (by default, _id is included).
                 const trainer = await trainerCollection.findOne(
                     { _id: new ObjectId(trainerId) },
                     { projection: { slots: 1, _id: 0 } }
                 );
 
-                // If no trainer is found with the given ID
                 if (!trainer) {
                     return res.status(404).send({ message: "Trainer not found." });
                 }
 
-                // If trainer found but has no 'slots' array or it's empty, return an empty array
-                // This ensures a consistent response even if a trainer has no slots yet.
                 if (!trainer.slots) {
                     return res.status(200).send([]);
                 }
 
-                // Send the array of slots
                 res.status(200).send(trainer.slots);
 
             } catch (error) {
-                // Log the error for debugging purposes
                 console.error("Error fetching trainer slots:", error.message, error.stack);
-                // Send a generic 500 status for internal server errors
                 res.status(500).send({ message: "Failed to fetch trainer slots." });
             }
         });
@@ -270,16 +247,15 @@ async function run() {
                 const {
                     slotName,
                     slotTime,
-                    days,          // Expected to be an array, e.g., ["Monday"]
+                    days,
                     duration,
                     classType,
                     maxParticipants,
                     description,
-                    trainerId,     // The _id of the trainer document from frontend
-                    email          // Trainer's email from frontend (for verification against token)
+                    trainerId,
+                    email
                 } = req.body;
 
-                // Basic validation for required fields
                 if (!slotName || !slotTime || !days || !Array.isArray(days) || days.length === 0 || !duration || !classType || !trainerId || !email) {
                     return res.status(400).send({ message: "Missing required slot details or invalid 'days' format. Required: slotName, slotTime, days (array), duration, classType, trainerId, email." });
                 }
@@ -369,7 +345,6 @@ async function run() {
             }
         });
 
-        // Trainer status Route
         app.patch("/trainers/:id/status", verifyFBToken, verifyAdmin, async (req, res) => {
             try {
                 const trainerId = req.params.id;
@@ -517,18 +492,15 @@ async function run() {
         });
 
         // ================= Review Routes =================
-        app.post('/reviews', verifyFBToken, async (req, res) => { // Added verifyFBToken
+        app.post('/reviews', verifyFBToken, async (req, res) => {
             try {
                 const { trainerId, reviewerEmail, reviewerName, trainerEmail, trainerName, rating, createdAt, } = req.body;
+                const comment = req.body.comment;
 
-                const comment = req.body.comment; // Get comment separately to check its existence/value
-
-                // Authorization: Ensure the user submitting the review is the authenticated user
                 if (req.decoded.email !== reviewerEmail) {
                     return res.status(403).send({ message: "Forbidden: You can only submit reviews for your own account." });
                 }
 
-                // Basic validation for required fields (comment is now fully optional)
                 if (!trainerId || !reviewerEmail || !reviewerName ||
                     !trainerEmail || !trainerName || typeof rating === 'undefined') {
                     return res.status(400).send({ message: "Missing required review data (trainerId, reviewerEmail, reviewerName, trainerEmail, trainerName, rating)." });
@@ -541,46 +513,40 @@ async function run() {
                 }
 
                 const existingDetailedReview = await reviewsCollection.findOne({
-                    reviewerEmail: reviewerEmail // One detailed review per booking per user
+                    reviewerEmail: reviewerEmail,
                 });
 
                 if (existingDetailedReview) {
                     return res.status(409).send({ message: "A detailed review for this booking by your account already exists." });
                 }
-                // --- End Crucial Check ---
 
-
-                // Construct the review document
                 const reviewDocument = {
-                    trainerId: new ObjectId(trainerId), // Convert to ObjectId
+                    trainerId: new ObjectId(trainerId),
                     reviewerEmail: reviewerEmail,
                     reviewerName: reviewerName,
                     trainerEmail: trainerEmail,
                     trainerName: trainerName,
                     rating: rating,
-                    createdAt: new Date(createdAt || Date.now()), // Use provided createdAt or current time
-                    updatedAt: new Date(), // Add an updatedAt field for potential future edits
+                    createdAt: new Date(createdAt || Date.now()),
+                    updatedAt: new Date(),
                 };
 
-                // --- Conditionally add 'comment' only if it's provided and not an empty string ---
                 if (comment && comment.trim() !== '') {
                     reviewDocument.comment = comment.trim();
                 }
 
                 const result = await reviewsCollection.insertOne(reviewDocument);
-                const newReview = { _id: result.insertedId, ...reviewDocument }; // For sending back the created review
+                const newReview = { _id: result.insertedId, ...reviewDocument };
 
-                // --- Important: Mark the booking as reviewed ---
                 const updateBookingResult = await bookingsCollection.updateOne(
                     { $set: { hasReviewed: true, reviewSubmittedAt: new Date() } }
                 );
-
 
                 res.status(201).send({ message: "Detailed review submitted successfully!", review: newReview });
 
             } catch (error) {
                 console.error("Error submitting detailed review:", error);
-                if (error.code === 11000) { // MongoDB duplicate key error code
+                if (error.code === 11000) {
                     return res.status(409).send({ message: "A detailed review for this booking by your account already exists (database conflict)." });
                 }
                 res.status(500).send({ message: "Failed to submit detailed review.", error: error.message });
@@ -589,20 +555,16 @@ async function run() {
 
         app.get("/reviews", async (req, res) => {
             try {
-                const trainerId = req.query.trainerId; // Query parameter for filtering by trainer
+                const trainerId = req.query.trainerId;
 
                 let query = {};
                 if (trainerId) {
-                    // Validate trainerId format if provided
                     if (!ObjectId.isValid(trainerId)) {
                         return res.status(400).send({ message: "Invalid Trainer ID format for query." });
                     }
-                    query.trainerId = new ObjectId(trainerId); // Convert to ObjectId for database query
+                    query.trainerId = new ObjectId(trainerId);
                 }
 
-                // Fetch reviews from the collection
-                // You might want to add pagination (e.g., .skip().limit()) or more advanced sorting options.
-                // Sorting by 'createdAt' in descending order (latest reviews first) is common.
                 const reviews = await reviewsCollection.find(query).sort({ createdAt: -1 }).toArray();
 
                 res.status(200).send(reviews);
@@ -638,7 +600,6 @@ async function run() {
                     return res.status(404).send({ message: "Class not found." });
                 }
 
-                // Optional: convert _id to string if needed by frontend
                 classItem._id = classItem._id.toString();
 
                 res.send(classItem);
@@ -647,7 +608,6 @@ async function run() {
                 res.status(500).send({ message: "Failed to fetch class." });
             }
         });
-
 
         app.post("/classes", verifyFBToken, verifyAdmin, async (req, res) => {
             try {
@@ -663,16 +623,13 @@ async function run() {
                     prerequisites,
                     benefits,
                     schedule,
-                    trainers // This will now be an array of trainer objects
+                    trainers
                 } = req.body;
 
-                // --- Input Validation ---
-                // 1. Ensure required class fields are present
                 if (!name || !category || !description || !duration || !image || !difficulty || !Array.isArray(trainers) || trainers.length === 0) {
                     return res.status(400).send({ message: "Missing required class fields: name, category, description, duration, image, difficulty, and at least one trainer." });
                 }
 
-                // 2. Validate each trainer object in the array for ALL required trainer fields
                 const invalidTrainers = trainers.filter(trainer =>
                     !trainer.name || !trainer.email || !trainer.id || typeof trainer.bookingsCount !== 'number'
                 );
@@ -681,13 +638,10 @@ async function run() {
                     return res.status(400).send({ message: "Each trainer must have a name (string), email (string), id (string), and bookingsCount (number)." });
                 }
 
-                // --- Calculate Total Bookings from Trainers ---
-                // Sum the bookingsCount for all trainers associated with this class
                 const totalTrainerBookings = trainers.reduce((sum, trainer) => {
-                    return sum + (trainer.bookingsCount || 0); // Ensure it defaults to 0 if undefined
+                    return sum + (trainer.bookingsCount || 0);
                 }, 0);
 
-                // --- Prepare New Class Object ---
                 const newClass = {
                     name,
                     image,
@@ -712,7 +666,6 @@ async function run() {
                     updatedAt: new Date(),
                 };
 
-                // --- Insert into Database ---
                 const result = await classesCollection.insertOne(newClass);
                 res.status(201).send({ message: "Class added successfully!", insertedId: result.insertedId });
 
@@ -738,7 +691,6 @@ async function run() {
                 const page = parseInt(req.query.page);
                 const limit = parseInt(req.query.limit);
 
-                // If both page and limit are provided, use pagination
                 if (!isNaN(page) && !isNaN(limit)) {
                     const skip = (page - 1) * limit;
 
@@ -761,7 +713,6 @@ async function run() {
                     });
                 }
 
-                // If no page or limit, return all posts
                 const posts = await communityCollection
                     .find()
                     .sort({ createdAt: -1 })
@@ -1003,13 +954,12 @@ async function run() {
             try {
                 const subscribers = await newsLetterCollection.find().sort({ createdAt: -1 }).toArray();
 
-                // Attach user role if user exists
                 const subscribersWithRole = await Promise.all(
                     subscribers.map(async (subscriber) => {
                         const user = await usersCollection.findOne({ email: subscriber.email });
                         return {
                             ...subscriber,
-                            userRole: user?.role || 'Subscriber',  // default role if no user account
+                            userRole: user?.role || 'Subscriber',
                         };
                     })
                 );
@@ -1052,6 +1002,10 @@ async function run() {
         app.delete('/newsletter/:id', async (req, res) => {
             try {
                 const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid subscriber ID format." });
+                }
 
                 const result = await newsLetterCollection.deleteOne({ _id: new ObjectId(id) });
 
@@ -1165,7 +1119,7 @@ async function run() {
                 if (bio !== undefined) updateFields.bio = bio;
                 if (fitnessGoals !== undefined) updateFields.fitnessGoals = fitnessGoals;
 
-                if (Object.keys(updateFields).length === 1) {
+                if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
                     return res.status(400).send({ message: "No valid fields to update." });
                 }
 
@@ -1341,6 +1295,8 @@ async function run() {
                             paymentStatus: 1,
                             createdAt: 1,
                             updatedAt: 1,
+                            hasReviewed: 1,
+                            reviewSubmittedAt: 1,
                             userName: "$userDetails.displayName",
                             userEmail: "$userDetails.email",
                             userPhotoURL: "$userDetails.photoURL",
@@ -1356,12 +1312,10 @@ async function run() {
 
                 if (queryEmail) {
                     if (queryRole === 'trainer') {
-                        // Match bookings where the trainer's email matches the query email
                         pipeline.unshift({
                             $match: { trainerEmail: queryEmail }
                         });
                     } else {
-                        // Match bookings where the user's email matches the query email
                         pipeline.unshift({
                             $match: { email: queryEmail }
                         });
@@ -1370,7 +1324,6 @@ async function run() {
 
                 const bookings = await bookingsCollection.aggregate(pipeline).toArray();
 
-                // Calculate total revenue only for the fetched bookings
                 const totalRevenue = bookings.reduce((sum, b) => sum + (b.price || 0), 0);
 
                 res.send({ bookings, totalRevenue });
@@ -1380,18 +1333,16 @@ async function run() {
             }
         });
 
-        // Get user-specific bookings (protected)
         app.get("/bookings/user/:email", verifyFBToken, async (req, res) => {
             const email = req.params.email;
 
-            // Important: Use req.decoded.email for authorization, not req.params.email directly
             if (req.decoded.role !== "admin" && req.decoded.email !== email) {
                 return res.status(403).send({ message: "Forbidden: Cannot access other user's bookings" });
             }
 
             try {
                 const bookings = await bookingsCollection.aggregate([
-                    { $match: { email: email } }, // Match by the email from params after authorization
+                    { $match: { email: email } },
                     {
                         $lookup: {
                             from: "users",
@@ -1428,6 +1379,8 @@ async function run() {
                             paymentStatus: 1,
                             createdAt: 1,
                             updatedAt: 1,
+                            hasReviewed: 1,
+                            reviewSubmittedAt: 1,
                             userName: "$userDetails.displayName",
                             userEmail: "$userDetails.email",
                             userPhotoURL: "$userDetails.photoURL",
@@ -1448,18 +1401,16 @@ async function run() {
             }
         });
 
-        // Create a new booking AND update trainer's slot
-        app.post('/bookings', verifyFBToken, async (req, res) => { // <-- verifyFBToken ADDED HERE
+        app.post('/bookings', verifyFBToken, async (req, res) => {
             try {
                 const {
                     email, trainerId, slotId, slotName, slotTime,
-                    slotDuration, // Changed from 'duration' to match frontend
+                    slotDuration,
                     description,
                     slotDay, packageId, packageName, packagePrice, sessionType,
-                    price, transactionId, paymentStatus, memberInfo // memberInfo from frontend
+                    price, transactionId, paymentStatus, memberInfo
                 } = req.body;
 
-                // Basic validation
                 if (!email || !trainerId || !slotId || typeof price === 'undefined' || !transactionId) {
                     return res.status(400).json({ message: 'Missing required booking data (email, trainerId, slotId, price, transactionId).' });
                 }
@@ -1471,26 +1422,22 @@ async function run() {
                     return res.status(400).json({ message: 'Price must be a positive number.' });
                 }
 
-                // Authorization: User can only book for themselves
                 if (req.decoded.email !== email) {
                     return res.status(403).json({ message: 'Forbidden: You can only book for your own account.' });
                 }
 
-                // Find trainer and the specific slot
                 const trainerAndSlot = await trainerCollection.aggregate([
                     {
                         $match: {
                             _id: new ObjectId(trainerId),
-                            status: 'accepted' // Ensure trainer is active/accepted
+                            status: 'accepted'
                         }
                     },
                     {
-                        $unwind: '$slots' // Deconstruct the slots array
+                        $unwind: '$slots'
                     },
                     {
                         $match: {
-                            // Assuming 'slots.id' is the custom string ID you use for slots
-                            // If it's MongoDB's default _id for subdocuments, change to 'slots._id'
                             'slots.id': slotId
                         }
                     },
@@ -1509,24 +1456,21 @@ async function run() {
 
                 const { targetSlot } = trainerAndSlot[0];
 
-                // Initialize bookingCount if it doesn't exist
                 targetSlot.bookingCount = targetSlot.bookingCount || 0;
 
-                // Check if slot is already fully booked before proceeding
                 if (targetSlot.bookingCount >= targetSlot.maxParticipants) {
                     return res.status(409).json({ message: 'This slot is fully booked. Please choose another one.' });
                 }
 
-                // Create the booking document
                 const bookingDocument = {
                     email,
                     trainerId: new ObjectId(trainerId),
                     slotId,
                     slotName,
                     slotTime: slotTime || null,
-                    duration: slotDuration || null, // Using slotDuration from frontend
-                    description: description || null, // Will be null if not sent by frontend
-                    slotDay: Array.isArray(slotDay) ? slotDay : (slotDay ? [String(slotDay)] : []), // Ensure it's an array
+                    duration: slotDuration || null,
+                    description: description || null,
+                    slotDay: Array.isArray(slotDay) ? slotDay : (slotDay ? [String(slotDay)] : []),
                     packageId: packageId || null,
                     packageName: packageName || null,
                     packagePrice: packagePrice || null,
@@ -1536,59 +1480,50 @@ async function run() {
                     paymentStatus: paymentStatus || "Completed",
                     createdAt: new Date(),
                     updatedAt: new Date(),
+                    hasReviewed: false,
+                    reviewSubmittedAt: null,
                 };
 
-                // Insert the booking into the bookings collection
                 const bookingResult = await bookingsCollection.insertOne(bookingDocument);
                 const newBooking = { _id: bookingResult.insertedId, ...bookingDocument };
 
-                // Prepare member information for updating the trainer's slot
-                // Ensure memberInfo is provided from the frontend, or use decoded token data
                 const memberDetailsForSlot = memberInfo || {
                     name: req.decoded.displayName || email,
                     email: email,
                     package: packageName || "N/A",
                 };
 
-
-                // Determine if the slot will be fully booked after this booking
                 let isSlotFullyBooked = false;
                 if (targetSlot.maxParticipants === 1 || (targetSlot.bookingCount + 1 >= targetSlot.maxParticipants)) {
                     isSlotFullyBooked = true;
                 }
 
-                // Define update fields for the trainer's slot
                 const updateFieldsForSlot = {
-                    "$inc": { "slots.$.bookingCount": 1 }, // Increment booking count
-                    "$push": { "slots.$.bookedMembers": memberDetailsForSlot }, // Add new member to bookedMembers array
-                    "$set": { "updatedAt": new Date() } // Update the trainer document's updatedAt
+                    "$inc": { "slots.$.bookingCount": 1 },
+                    "$push": { "slots.$.bookedMembers": memberDetailsForSlot },
+                    "$set": { "updatedAt": new Date() }
                 };
 
-                // If the slot becomes fully booked, update its status
                 if (isSlotFullyBooked) {
                     updateFieldsForSlot["$set"]["slots.$.isBooked"] = true;
                     updateFieldsForSlot["$set"]["slots.$.status"] = "booked";
                 }
 
-                // Update the specific slot within the trainer's document
                 const updateTrainerResult = await trainerCollection.updateOne(
-                    { "_id": new ObjectId(trainerId), "slots.id": slotId }, // <-- Ensure 'slots.id' matches your schema
+                    { "_id": new ObjectId(trainerId), "slots.id": slotId },
                     updateFieldsForSlot
                 );
 
-                // If trainer slot update fails, roll back the booking
                 if (updateTrainerResult.modifiedCount === 0) {
                     await bookingsCollection.deleteOne({ _id: bookingResult.insertedId });
                     return res.status(500).json({ message: 'Failed to update trainer slot. Booking rolled back.' });
                 }
 
-                // Both booking and slot update succeeded
                 res.status(201).json({ message: 'Booking successful and slot booking count updated!', booking: newBooking });
 
             } catch (error) {
                 console.error('Booking creation or slot update error:', error);
-                // More specific error messages could be handled here
-                if (error.code === 11000) { // Duplicate key error (if you had unique index on bookings)
+                if (error.code === 11000) {
                     res.status(409).json({ message: 'This booking already exists or a similar entry was made.' });
                 } else {
                     res.status(500).json({ message: 'An internal server error occurred during booking. Please try again later.' });
@@ -1596,7 +1531,6 @@ async function run() {
             }
         });
 
-        // Patch an existing booking (e.g., to update payment status later if needed)
         app.patch("/bookings/:id", verifyFBToken, async (req, res) => {
             try {
                 const id = req.params.id;
@@ -1609,7 +1543,6 @@ async function run() {
                 const booking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
                 if (!booking) return res.status(404).send({ message: "Booking not found" });
 
-                // Authorization for updating a booking
                 if (booking.email !== req.decoded.email && req.decoded.role !== "admin") {
                     return res.status(403).send({ message: "Forbidden: Cannot update others' bookings" });
                 }
@@ -1618,7 +1551,6 @@ async function run() {
                 if (transactionId) updateFields.transactionId = transactionId;
                 if (paymentStatus) updateFields.paymentStatus = paymentStatus;
 
-                // Ensure there are actual fields to update
                 if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) {
                     return res.status(400).send({ message: "No valid fields to update (transactionId or paymentStatus)." });
                 }
@@ -1648,12 +1580,10 @@ async function run() {
             }
 
             try {
-                // Stripe amount is in cents, so multiply by 100
                 const paymentIntent = await stripe.paymentIntents.create({
                     amount: Math.round(amount * 100),
                     currency: "usd",
                     payment_method_types: ["card"],
-                    // Optional: add description, receipt_email if needed
                     description: `Membership payment for ${req.decoded.email}`,
                     receipt_email: req.decoded.email,
                 });
@@ -1665,7 +1595,6 @@ async function run() {
             }
         });
 
-        // This endpoint could be used for logging payment details separately from booking
         app.post("/payments", verifyFBToken, async (req, res) => {
             try {
                 const paymentData = req.body;
@@ -1689,6 +1618,9 @@ async function run() {
         });
 
     } finally {
+        // Ensures that the client will close when you finish/error
+        // Commented out to keep connection open for ongoing API requests
+        // await client.close();
     }
 }
 
