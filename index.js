@@ -76,8 +76,8 @@ const verifyAdmin = async (req, res, next) => {
 
 async function run() {
     try {
-        await client.connect();
-        await client.db("admin").command({ ping: 1 });
+        // await client.connect();
+        // await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         const db = client.db("fitflowDB");
@@ -948,7 +948,7 @@ async function run() {
         });
 
         // ================ Newsletter Routes ================
-        app.get('/newsletter', verifyAdmin, async (req, res) => {
+        app.get('/newsletter', async (req, res) => {
             try {
                 const subscribers = await newsLetterCollection.find().sort({ createdAt: -1 }).toArray();
 
@@ -957,7 +957,9 @@ async function run() {
                         const user = await usersCollection.findOne({ email: subscriber.email });
                         return {
                             ...subscriber,
-                            userRole: user?.role || 'Subscriber',
+                            userRole: user?.role,
+                            isUnsubscribed: subscriber.isUnsubscribed || false,
+                            unsubscribedAt: subscriber.unsubscribedAt || null
                         };
                     })
                 );
@@ -969,7 +971,7 @@ async function run() {
             }
         });
 
-        app.post('/newsletter', async (req, res) => {
+        app.post('/newsletter/subscribe', async (req, res) => {
             try {
                 const { name, email } = req.body;
 
@@ -977,23 +979,65 @@ async function run() {
                     return res.status(400).json({ message: 'Name and email are required.' });
                 }
 
-                const exists = await newsLetterCollection.findOne({ email });
-                if (exists) {
-                    return res.status(409).json({ message: 'You are already subscribed.' });
+                const existingSubscriber = await newsLetterCollection.findOne({ email });
+
+                if (existingSubscriber) {
+                    if (existingSubscriber.isUnsubscribed) {
+                        const updateResult = await newsLetterCollection.updateOne(
+                            { email },
+                            { $set: { name, isUnsubscribed: false, createdAt: new Date(), unsubscribedAt: null } }
+                        );
+                        if (updateResult.modifiedCount === 1) {
+                            return res.status(200).json({ message: 'Successfully re-subscribed!' });
+                        } else {
+                            return res.status(500).json({ message: 'Failed to re-subscribe.' });
+                        }
+                    } else {
+                        return res.status(409).json({ message: 'You are already subscribed.' });
+                    }
                 }
 
                 const newSubscriber = {
                     name,
                     email,
                     createdAt: new Date(),
+                    isUnsubscribed: false,
+                    unsubscribedAt: null,
                 };
 
                 await newsLetterCollection.insertOne(newSubscriber);
 
                 res.status(201).json({ message: 'Successfully subscribed!' });
             } catch (err) {
-                console.error('POST /newsletter error:', err);
-                res.status(500).json({ message: 'Server error' });
+                console.error('POST /newsletter/subscribe error:', err);
+                res.status(500).json({ message: 'Server error during subscription.' });
+            }
+        });
+
+        app.post('/newsletter/unsubscribe', async (req, res) => {
+            try {
+                const { email } = req.body;
+
+                if (!email) {
+                    return res.status(400).json({ message: 'Email is required for unsubscription.' });
+                }
+
+                const result = await newsLetterCollection.updateOne(
+                    { email, isUnsubscribed: false },
+                    { $set: { isUnsubscribed: true, unsubscribedAt: new Date() } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ message: 'Email not found or already unsubscribed.' });
+                }
+                if (result.modifiedCount === 0) {
+                    return res.status(400).json({ message: 'Failed to unsubscribe (no changes made).' });
+                }
+
+                res.status(200).json({ message: 'Successfully unsubscribed.' });
+            } catch (err) {
+                console.error('POST /newsletter/unsubscribe error:', err);
+                res.status(500).json({ message: 'Server error during unsubscription.' });
             }
         });
 
@@ -1008,7 +1052,7 @@ async function run() {
                 const result = await newsLetterCollection.deleteOne({ _id: new ObjectId(id) });
 
                 if (result.deletedCount === 1) {
-                    res.status(200).json({ message: 'Subscriber deleted successfully.' });
+                    res.status(200).json({ message: 'Subscriber permanently deleted.' });
                 } else {
                     res.status(404).json({ message: 'Subscriber not found.' });
                 }
