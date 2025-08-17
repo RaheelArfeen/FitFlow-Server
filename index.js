@@ -432,6 +432,7 @@ async function run() {
             }
         });
 
+        // The `app.post` endpoint has been updated to support re-rating.
         app.post("/trainers/rating/:id", verifyFBToken, async (req, res) => {
             const trainerId = req.params.id;
             const { rating } = req.body;
@@ -452,11 +453,13 @@ async function run() {
                     return res.status(403).send({ success: false, message: "This trainer is not yet active or is no longer accepting ratings." });
                 }
 
-                const alreadyRated = trainer.ratings?.find((r) => r.email === userEmail);
-                if (alreadyRated) {
-                    return res.status(409).send({ success: false, message: "You already rated this trainer." });
-                }
+                // Find the user's existing rating.
+                const existingRatingIndex = trainer.ratings?.findIndex(r => r.email === userEmail);
+                const alreadyRated = existingRatingIndex !== -1;
 
+                const updatedRatings = [...(trainer.ratings || [])];
+
+                // Prepare the new or updated rating object.
                 const user = await usersCollection.findOne({ email: userEmail });
                 const userName = user?.displayName || "Anonymous User";
                 const userPhoto = user?.photoURL || "";
@@ -469,7 +472,15 @@ async function run() {
                     date: new Date(),
                 };
 
-                const updatedRatings = [...(trainer.ratings || []), newRating];
+                if (alreadyRated) {
+                    // If the user has already rated, update their existing rating in the array.
+                    updatedRatings[existingRatingIndex] = newRating;
+                } else {
+                    // If it's a new rating, add it to the array.
+                    updatedRatings.push(newRating);
+                }
+
+                // Recalculate the average rating from the updated array.
                 const avgRating =
                     updatedRatings.reduce((sum, r) => sum + r.rating, 0) / updatedRatings.length;
 
