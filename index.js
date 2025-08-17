@@ -168,8 +168,13 @@ async function run() {
                     slots
                 } = req.body;
 
-                if (!email || !name || !specialization || !description || !photoURL) {
+                // Validation checks remain the same
+                if (!email || !name || !specialization || specialization.length === 0 || !description || !photoURL.trim() === '') {
                     return res.status(400).send({ message: "Missing required application fields (email, name, specialization, description, photoURL)." });
+                }
+
+                if (!Array.isArray(specialization)) {
+                    return res.status(400).send({ message: "'specialization' must be an array of strings." });
                 }
 
                 if (slots !== undefined && !Array.isArray(slots)) {
@@ -180,8 +185,14 @@ async function run() {
                     return res.status(403).send({ message: "Forbidden: You can only submit a trainer application for your own account." });
                 }
 
-                const existingTrainer = await trainerCollection.findOne({ email });
+                // ⚠️ Core Change Here: Check for an existing trainer profile that is NOT rejected
+                const existingTrainer = await trainerCollection.findOne({
+                    email,
+                    status: { $ne: 'rejected' } // Find a document where status is not 'rejected'
+                });
+
                 if (existingTrainer) {
+                    // If a profile exists with 'pending' or 'accepted' status, block the new application
                     return res.status(409).send({ message: "A trainer profile (or application) already exists for this email." });
                 }
 
